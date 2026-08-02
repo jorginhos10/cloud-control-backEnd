@@ -1,12 +1,13 @@
 import os
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
-from app.routers import auth  # noqa: E402
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.database import get_connection
 
 app = FastAPI(title="ChefControl API")
 
@@ -20,9 +21,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth.router)
-
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/db-check")
+def db_check():
+    conn = get_connection()
+    try:
+        conn.run("SELECT 1")
+        return {"database": "ok"}
+    finally:
+        conn.close()
