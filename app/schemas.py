@@ -884,3 +884,21 @@ class UsuarioStaffOut(BaseModel):
     activo: bool
     propietario: bool
     ultimo_login: Optional[datetime] = None
+
+
+TamanoPapel = Literal["58mm", "80mm", "carta"]
+ModoImpresionComanda = Literal["si", "no", "driver"]
+
+
+class ConfiguracionImpresionOut(BaseModel):
+    modo_impresion_comanda: ModoImpresionComanda = Field(serialization_alias="modoImpresionComanda")
+    tamano_papel_comanda: TamanoPapel = Field(serialization_alias="tamanoPapelComanda")
+
+    model_config = {"populate_by_name": True}
+
+
+class ConfiguracionImpresionIn(BaseModel):
+    modo_impresion_comanda: ModoImpresionComanda = Field(alias="modoImpresionComanda")
+    tamano_papel_comanda: TamanoPapel = Field(alias="tamanoPapelComanda")
+
+    model_config = {"populate_by_name": True}

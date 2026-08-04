@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.auth import router as auth_router
 from app.clientes import router as clientes_router
+from app.configuracion import router as configuracion_router
 from app.cupones import router as cupones_router
 from app.dashboard import router as dashboard_router
 from app.database import get_connection
@@ -62,6 +63,7 @@ app.include_router(marketplace_router)
 app.include_router(proveedores_router)
 app.include_router(perdidas_router)
 app.include_router(usuarios_router)
+app.include_router(configuracion_router)
 
 
 @app.get("/health")
