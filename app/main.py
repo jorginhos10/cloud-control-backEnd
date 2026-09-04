@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.auth import router as auth_router
+from app.chat_soporte import router as chat_soporte_router
 from app.clientes import router as clientes_router
 from app.configuracion import router as configuracion_router
 from app.cupones import router as cupones_router
@@ -27,8 +28,11 @@ from app.perdidas import router as perdidas_router
 from app.proveedores import router as proveedores_router
 from app.recetas import router as recetas_router
 from app.reportes import router as reportes_router
+from app.soporte import router as soporte_router
+from app.suscripcion import router as suscripcion_router
 from app.usuarios import router as usuarios_router
 from app.ventas import router as ventas_router
+from app.webhooks import router as webhooks_router
 
 app = FastAPI(title="ChefControl API")
 
@@ -44,6 +48,7 @@ app.add_middleware(
 
 
 app.include_router(auth_router)
+app.include_router(chat_soporte_router)
 app.include_router(dashboard_router)
 app.include_router(mesas_router)
 app.include_router(cupones_router)
@@ -64,6 +69,9 @@ app.include_router(proveedores_router)
 app.include_router(perdidas_router)
 app.include_router(usuarios_router)
 app.include_router(configuracion_router)
+app.include_router(webhooks_router)
+app.include_router(suscripcion_router)
+app.include_router(soporte_router)
 
 
 @app.get("/health")

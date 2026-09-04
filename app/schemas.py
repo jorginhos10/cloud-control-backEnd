@@ -13,8 +13,12 @@ class RegisterIn(BaseModel):
 
 
 class LoginIn(BaseModel):
-    email: EmailStr
+    email: str = Field(min_length=1)
     password: str
+
+
+class ImpersonateIn(BaseModel):
+    user_id: int
 
 
 class UserOut(BaseModel):
@@ -28,8 +32,19 @@ class UserOut(BaseModel):
     ultimo_login: Optional[datetime] = Field(default=None, serialization_alias="ultimoLogin")
     propietario_id: Optional[int] = Field(default=None, serialization_alias="propietarioId")
     tenant_id: int = Field(serialization_alias="tenantId")
+    fecha_creacion: datetime = Field(serialization_alias="fechaCreacion")
 
     model_config = {"populate_by_name": True}
+
+
+class PerfilUpdateIn(BaseModel):
+    nombre: str = Field(min_length=3, max_length=150)
+    email: EmailStr
+
+
+class CambiarPasswordIn(BaseModel):
+    actual: str
+    nueva: str = Field(min_length=6, max_length=72)
 
 
 class TokenOut(BaseModel):
@@ -157,6 +172,8 @@ class VentaOut(BaseModel):
     tipo: TipoVenta
     estado: EstadoVenta
     total: float
+    descuento: float = 0
+    cupon_codigo: Optional[str] = None
     notas: str
     metodo_pago: Optional[MetodoPago] = None
     pago_efectivo: float = 0
@@ -176,6 +193,10 @@ class VentaNotasIn(BaseModel):
     notas: str = Field(default="", max_length=500)
 
 
+class VentaCuponIn(BaseModel):
+    codigo: str = Field(min_length=1, max_length=8)
+
+
 class VentaCobrarIn(BaseModel):
     metodo_pago: MetodoPago = "efectivo"
     pago_efectivo: float = Field(ge=0, default=0)
@@ -191,6 +212,16 @@ class VentaListadoItemOut(BaseModel):
     estado: EstadoVenta
     mesa_numero: Optional[int] = None
     platos: int
+    total: float
+    metodo_pago: Optional[MetodoPago] = None
+
+
+class PropinaItemOut(BaseModel):
+    id: int
+    fecha: Optional[datetime] = None
+    tipo: TipoVenta
+    mesa_numero: Optional[int] = None
+    propina: float
     total: float
     metodo_pago: Optional[MetodoPago] = None
 
@@ -741,7 +772,100 @@ class MarketplaceItemOut(BaseModel):
     categoria: str
     unidad_medida: str
     precio_unitario: float
-    cantidad_stock: float
+
+
+class TiendaOut(BaseModel):
+    id: str
+    nombre: str
+    descripcion: Optional[str] = None
+    categoria: Optional[str] = None
+    color: str = "#16a085"
+    total_productos: int
+
+
+class PlanPublicoOut(BaseModel):
+    id: int
+    nombre: str
+    slug: str
+    descripcion: Optional[str] = None
+    precio: float
+    periodo: str
+    color: str
+    caracteristicas: list[str]
+    destacado: bool
+    actual: bool = False
+
+
+class SeleccionarPlanIn(BaseModel):
+    plan_id: int
+
+
+class PedidoItemIn(BaseModel):
+    producto_id: int
+    cantidad: float = Field(gt=0)
+
+
+class PedidoIn(BaseModel):
+    tienda_id: int
+    items: list[PedidoItemIn]
+    cupon_codigo: Optional[str] = None
+
+
+class PedidoItemOut(BaseModel):
+    id: int
+    producto_id: int
+    nombre: str
+    categoria: str
+    precio_unitario: float
+    cantidad: float
+    subtotal: float
+
+
+class PedidoOut(BaseModel):
+    id: int
+    tienda_id: int
+    tienda_nombre: str
+    subtotal: float
+    descuento: float
+    total: float
+    cupon_codigo: Optional[str] = None
+    estado: str
+    wompi_reference: str
+    wompi_transaction_id: Optional[str] = None
+    created_at: datetime
+    items: list[PedidoItemOut] = []
+
+
+class WompiCheckoutOut(BaseModel):
+    checkout_url: str
+    public_key: str
+    currency: str = "COP"
+    amount_in_cents: int
+    reference: str
+    signature: str
+    redirect_url: str
+
+
+class PedidoConCheckoutOut(BaseModel):
+    pedido: PedidoOut
+    wompi: WompiCheckoutOut
+
+
+class ConfirmarTransaccionIn(BaseModel):
+    transaction_id: str
+
+
+class CuponValidarIn(BaseModel):
+    codigo: str
+    subtotal: float
+
+
+class CuponValidarOut(BaseModel):
+    valido: bool
+    mensaje: str = ""
+    tipo: Optional[str] = None
+    valor: Optional[float] = None
+    descuento: float = 0
 
 
 CategoriaProveedor = Literal["A", "B", "C"]
@@ -853,16 +977,20 @@ RolStaff = Literal["admin", "cocina", "inventario", "mesero"]
 
 
 class UsuarioStaffIn(BaseModel):
-    username: str = Field(min_length=3, max_length=50)
     nombre: str = Field(min_length=1, max_length=150)
+    apellido: str = Field(min_length=1, max_length=150)
+    telefono: str = Field(min_length=1, max_length=30)
     email: EmailStr
+    numero_documento: str = Field(min_length=1, max_length=30)
     rol: RolStaff = "mesero"
-    password: str = Field(min_length=6, max_length=72)
     activo: bool = True
 
 
 class UsuarioStaffUpdateIn(BaseModel):
     nombre: str = Field(min_length=1, max_length=150)
+    apellido: str = Field(min_length=1, max_length=150)
+    telefono: str = Field(min_length=1, max_length=30)
+    numero_documento: str = Field(min_length=1, max_length=30)
     rol: RolStaff
     activo: bool
 
@@ -879,7 +1007,10 @@ class UsuarioStaffOut(BaseModel):
     id: int
     username: str
     nombre: str
+    apellido: str
+    telefono: str
     email: str
+    numero_documento: str
     rol: RolStaff
     activo: bool
     propietario: bool

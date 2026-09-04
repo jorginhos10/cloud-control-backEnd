@@ -8,10 +8,13 @@ from app.schemas import (
     CatalogoItemOut,
     CocinaItemOut,
     CocinaOrdenOut,
+    DashboardProductoCantidadOut,
+    PropinaItemOut,
     SalonEstadisticasOut,
     SalonMesaOut,
     VentaCobrarIn,
     VentaCrearIn,
+    VentaCuponIn,
     VentaDirectaEstadisticasOut,
     VentaEstadoIn,
     VentaItemCantidadIn,
@@ -116,6 +119,61 @@ def ventas_directa_estadisticas(current_user: UserOut = Depends(get_current_user
         conn.close()
 
 
+@router.get("/ventas/mis-ventas-hoy", response_model=VentaDirectaEstadisticasOut)
+def mis_ventas_hoy(current_user: UserOut = Depends(get_current_user)):
+    conn = get_connection()
+    try:
+        row = conn.run(
+            "SELECT COUNT(*), COALESCE(SUM(total), 0) FROM ventas "
+            "WHERE usuario_id = :uid AND creado_por_id = :cid AND estado = 'cerrada' AND fecha_cierre::date = :hoy",
+            uid=current_user.tenant_id, cid=current_user.id, hoy=date.today(),
+        )[0]
+        return VentaDirectaEstadisticasOut(ventas_hoy=row[0], ingresos_hoy=float(row[1]))
+    finally:
+        conn.close()
+
+
+@router.get("/ventas/mis-propinas", response_model=list[PropinaItemOut])
+def mis_propinas(current_user: UserOut = Depends(get_current_user)):
+    conn = get_connection()
+    try:
+        rows = conn.run(
+            "SELECT v.id, v.fecha_cierre, v.tipo, m.numero AS mesa_numero, v.propina, v.total, v.metodo_pago "
+            "FROM ventas v "
+            "LEFT JOIN mesas m ON m.id = v.mesa_id "
+            "WHERE v.usuario_id = :uid AND v.creado_por_id = :cid "
+            "AND v.estado = 'cerrada' AND v.propina > 0 AND v.fecha_cierre::date = :hoy "
+            "ORDER BY v.fecha_cierre DESC",
+            uid=current_user.tenant_id, cid=current_user.id, hoy=date.today(),
+        )
+        return [
+            PropinaItemOut(
+                id=r[0], fecha=r[1], tipo=r[2], mesa_numero=r[3],
+                propina=float(r[4]), total=float(r[5]), metodo_pago=r[6],
+            )
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+@router.get("/ventas/mis-ventas-hoy/productos", response_model=list[DashboardProductoCantidadOut])
+def mis_productos_hoy(current_user: UserOut = Depends(get_current_user)):
+    conn = get_connection()
+    try:
+        rows = conn.run(
+            "SELECT vi.nombre, SUM(vi.cantidad) AS cantidad "
+            "FROM venta_items vi JOIN ventas v ON v.id = vi.venta_id "
+            "WHERE v.usuario_id = :uid AND v.creado_por_id = :cid "
+            "AND v.estado = 'cerrada' AND v.fecha_cierre::date = :hoy "
+            "GROUP BY vi.nombre ORDER BY cantidad DESC LIMIT 5",
+            uid=current_user.tenant_id, cid=current_user.id, hoy=date.today(),
+        )
+        return [DashboardProductoCantidadOut(producto=r[0], cantidad=r[1]) for r in rows]
+    finally:
+        conn.close()
+
+
 CATALOGO_SELECT = """
     SELECT
         recetas.id, recetas.nombre, receta_categorias.label AS categoria, recetas.precio_venta,
@@ -194,9 +252,41 @@ def cocina_ordenes(current_user: UserOut = Depends(get_current_user)):
         conn.close()
 
 
+COCINA_HISTORIAL_SELECT = """
+    SELECT ventas.id, ventas.tipo, ventas.estado, ventas.notas, ventas.fecha_apertura,
+           mesas.numero AS mesa_numero, mesas.nombre AS mesa_nombre, zonas.key AS mesa_zona
+    FROM ventas
+    LEFT JOIN mesas ON mesas.id = ventas.mesa_id
+    LEFT JOIN zonas ON zonas.id = mesas.zona_id
+    WHERE ventas.usuario_id = :uid AND ventas.estado IN ('cerrada', 'cancelada')
+      AND COALESCE(ventas.fecha_cierre, ventas.fecha_apertura)::date = :hoy
+    ORDER BY COALESCE(ventas.fecha_cierre, ventas.fecha_apertura) DESC
+"""
+
+
+@router.get("/cocina/historial", response_model=list[CocinaOrdenOut])
+def cocina_historial(current_user: UserOut = Depends(get_current_user)):
+    conn = get_connection()
+    try:
+        rows = conn.run(COCINA_HISTORIAL_SELECT, uid=current_user.tenant_id, hoy=date.today())
+        ordenes = []
+        for r in rows:
+            item_rows = conn.run(COCINA_ITEMS_SELECT, id=r[0])
+            ordenes.append(
+                CocinaOrdenOut(
+                    id=r[0], tipo=r[1], estado=r[2], notas=r[3], fecha_apertura=r[4],
+                    mesa_numero=r[5], mesa_nombre=r[6], mesa_zona=r[7],
+                    items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3]) for i in item_rows],
+                )
+            )
+        return ordenes
+    finally:
+        conn.close()
+
+
 VENTA_COLUMNS = [
-    "id", "mesa_id", "tipo", "estado", "total", "notas", "metodo_pago",
-    "pago_efectivo", "pago_tarjeta", "pago_transferencia", "propina",
+    "id", "mesa_id", "tipo", "estado", "total", "descuento", "cupon_id", "cupon_codigo",
+    "notas", "metodo_pago", "pago_efectivo", "pago_tarjeta", "pago_transferencia", "propina",
     "fecha_apertura", "fecha_cierre",
 ]
 ITEM_COLUMNS = ["id", "receta_id", "nombre", "cantidad", "precio_unitario", "subtotal"]
@@ -228,6 +318,8 @@ def _get_venta_con_items(conn, usuario_id: int, venta_id: int) -> VentaOut:
         tipo=v["tipo"],
         estado=v["estado"],
         total=float(v["total"]),
+        descuento=float(v["descuento"]),
+        cupon_codigo=v["cupon_codigo"],
         notas=v["notas"],
         metodo_pago=v["metodo_pago"],
         pago_efectivo=float(v["pago_efectivo"]),
@@ -241,11 +333,29 @@ def _get_venta_con_items(conn, usuario_id: int, venta_id: int) -> VentaOut:
 
 
 def _recalcular_total(conn, venta_id: int) -> None:
-    conn.run(
-        "UPDATE ventas SET total = (SELECT COALESCE(SUM(subtotal), 0) FROM venta_items WHERE venta_id = :id) "
-        "WHERE id = :id",
-        id=venta_id,
-    )
+    """Recomputes both the discount and the total from scratch every time —
+    called after any item or coupon change, so a percentage/product coupon
+    always tracks the current cart instead of freezing a stale amount."""
+    items = conn.run("SELECT receta_id, subtotal FROM venta_items WHERE venta_id = :id", id=venta_id)
+    subtotal_total = sum(float(s) for _, s in items)
+
+    cupon_id = conn.run("SELECT cupon_id FROM ventas WHERE id = :id", id=venta_id)[0][0]
+    descuento = 0.0
+    if cupon_id:
+        cupon = conn.run("SELECT tipo, descuento, id_receta FROM cupones WHERE id = :id", id=cupon_id)
+        if cupon:
+            tipo, valor, id_receta = cupon[0][0], float(cupon[0][1]), cupon[0][2]
+            if tipo == "porcentaje":
+                descuento = subtotal_total * valor / 100
+            elif tipo == "valor":
+                descuento = min(valor, subtotal_total)
+            elif tipo == "producto":
+                base = sum(float(s) for rid, s in items if rid == id_receta)
+                descuento = base * valor / 100
+
+    descuento = round(descuento, 2)
+    total = round(max(0.0, subtotal_total - descuento), 2)
+    conn.run("UPDATE ventas SET descuento = :d, total = :t WHERE id = :id", d=descuento, t=total, id=venta_id)
 
 
 def _liberar_mesa_si_corresponde(conn, mesa_id: int | None) -> None:
@@ -272,6 +382,7 @@ def listado_ventas(
     desde: date | None = Query(default=None),
     hasta: date | None = Query(default=None),
     pagina: int = Query(default=1, ge=1),
+    propias: bool = Query(default=False),
     current_user: UserOut = Depends(get_current_user),
 ):
     conn = get_connection()
@@ -282,6 +393,9 @@ def listado_ventas(
 
         clauses = ["v.usuario_id = :uid", "v.fecha_apertura::date BETWEEN :desde AND :hasta"]
         params: dict = {"uid": current_user.tenant_id, "desde": desde, "hasta": hasta}
+        if propias:
+            clauses.append("v.creado_por_id = :cid")
+            params["cid"] = current_user.id
         if estado:
             clauses.append("v.estado = :estado")
             params["estado"] = estado
@@ -354,9 +468,10 @@ def abrir_orden(payload: VentaCrearIn, current_user: UserOut = Depends(get_curre
     try:
         if payload.mesa_id is None:
             rows = conn.run(
-                "INSERT INTO ventas (mesa_id, tipo, estado, usuario_id) VALUES (NULL, 'directa', 'abierta', :uid) "
+                "INSERT INTO ventas (mesa_id, tipo, estado, usuario_id, creado_por_id) "
+                "VALUES (NULL, 'directa', 'abierta', :uid, :cid) "
                 f"RETURNING {', '.join(VENTA_COLUMNS)}",
-                uid=current_user.tenant_id,
+                uid=current_user.tenant_id, cid=current_user.id,
             )
             return _get_venta_con_items(conn, current_user.tenant_id, rows[0][0])
 
@@ -375,10 +490,12 @@ def abrir_orden(payload: VentaCrearIn, current_user: UserOut = Depends(get_curre
             return _get_venta_con_items(conn, current_user.tenant_id, existente[0][0])
 
         rows = conn.run(
-            "INSERT INTO ventas (mesa_id, tipo, estado, usuario_id) VALUES (:mesa_id, 'mesa', 'abierta', :uid) "
+            "INSERT INTO ventas (mesa_id, tipo, estado, usuario_id, creado_por_id) "
+            "VALUES (:mesa_id, 'mesa', 'abierta', :uid, :cid) "
             f"RETURNING {', '.join(VENTA_COLUMNS)}",
             mesa_id=payload.mesa_id,
             uid=current_user.tenant_id,
+            cid=current_user.id,
         )
         conn.run("UPDATE mesas SET estado = 'ocupada' WHERE id = :id", id=payload.mesa_id)
         venta_id = rows[0][0]
@@ -546,6 +663,65 @@ def actualizar_notas(venta_id: int, payload: VentaNotasIn, current_user: UserOut
         conn.close()
 
 
+@router.post("/ventas/{venta_id}/cupon", response_model=VentaOut)
+def aplicar_cupon(venta_id: int, payload: VentaCuponIn, current_user: UserOut = Depends(get_current_user)):
+    conn = get_connection()
+    try:
+        venta = _get_venta_or_404(conn, current_user.tenant_id, venta_id)
+        if venta["estado"] not in ACTIVOS:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Esta orden ya está cerrada")
+
+        codigo = payload.codigo.strip().upper()
+        rows = conn.run(
+            "SELECT id, tipo, descuento, usos_max, usos_actual, estado, expira_en, id_receta "
+            "FROM cupones WHERE usuario_id = :uid AND codigo = :c",
+            uid=current_user.tenant_id, c=codigo,
+        )
+        if not rows:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cupón no válido")
+
+        cupon_id, tipo, valor, usos_max, usos_actual, estado_cupon, expira_en, id_receta = rows[0]
+        if estado_cupon != "activo":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ese cupón no está activo")
+        if expira_en and expira_en < date.today():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ese cupón ya expiró")
+        if usos_actual >= usos_max:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ese cupón ya alcanzó su límite de usos")
+
+        if tipo == "producto":
+            items = conn.run(
+                "SELECT 1 FROM venta_items WHERE venta_id = :id AND receta_id = :rid", id=venta_id, rid=id_receta
+            )
+            if not items:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Este cupón aplica a un producto que no está en la orden",
+                )
+
+        conn.run(
+            "UPDATE ventas SET cupon_id = :cid, cupon_codigo = :codigo WHERE id = :id",
+            cid=cupon_id, codigo=codigo, id=venta_id,
+        )
+        _recalcular_total(conn, venta_id)
+        return _get_venta_con_items(conn, current_user.tenant_id, venta_id)
+    finally:
+        conn.close()
+
+
+@router.delete("/ventas/{venta_id}/cupon", response_model=VentaOut)
+def quitar_cupon(venta_id: int, current_user: UserOut = Depends(get_current_user)):
+    conn = get_connection()
+    try:
+        venta = _get_venta_or_404(conn, current_user.tenant_id, venta_id)
+        if venta["estado"] not in ACTIVOS:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Esta orden ya está cerrada")
+        conn.run("UPDATE ventas SET cupon_id = NULL, cupon_codigo = NULL WHERE id = :id", id=venta_id)
+        _recalcular_total(conn, venta_id)
+        return _get_venta_con_items(conn, current_user.tenant_id, venta_id)
+    finally:
+        conn.close()
+
+
 @router.patch("/ventas/{venta_id}/estado", response_model=VentaOut)
 def cambiar_estado_cocina(venta_id: int, payload: VentaEstadoIn, current_user: UserOut = Depends(get_current_user)):
     conn = get_connection()
@@ -608,6 +784,20 @@ def cobrar_orden(venta_id: int, payload: VentaCobrarIn, current_user: UserOut = 
             prop=payload.propina,
             id=venta_id,
         )
+
+        if venta["cupon_id"]:
+            conn.run(
+                "UPDATE cupones SET usos_actual = usos_actual + 1 WHERE id = :id", id=venta["cupon_id"]
+            )
+            conn.run(
+                "UPDATE cupones SET estado = 'usado' WHERE id = :id AND usos_actual >= usos_max",
+                id=venta["cupon_id"],
+            )
+            conn.run(
+                "INSERT INTO cupones_usos (id_cupon, codigo, monto_descuento) VALUES (:id, :codigo, :monto)",
+                id=venta["cupon_id"], codigo=venta["cupon_codigo"], monto=venta["descuento"],
+            )
+
         _liberar_mesa_si_corresponde(conn, venta["mesa_id"])
         return _get_venta_con_items(conn, current_user.tenant_id, venta_id)
     finally:

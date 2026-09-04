@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pg8000.exceptions import DatabaseError
 
-from app.auth import UserOut, get_current_user, get_tenant_id
+from app.auth import UserOut, _make_username, get_current_user, get_tenant_id
 from app.database import get_connection
 from app.schemas import (
     UsuarioActivoIn,
@@ -16,12 +16,16 @@ router = APIRouter(prefix="/usuarios", dependencies=[Depends(get_current_user)])
 
 UNIQUE_VIOLATION = "23505"
 
-STAFF_COLUMNS = ["id", "username", "nombre", "email", "rol", "activo", "propietario", "ultimo_login"]
+STAFF_COLUMNS = [
+    "id", "username", "nombre", "apellido", "telefono", "email", "numero_documento",
+    "rol", "activo", "propietario", "ultimo_login",
+]
 
 
 def _row_to_staff(row: dict) -> UsuarioStaffOut:
     return UsuarioStaffOut(
-        id=row["id"], username=row["username"], nombre=row["nombre"], email=row["email"],
+        id=row["id"], username=row["username"], nombre=row["nombre"], apellido=row["apellido"],
+        telefono=row["telefono"], email=row["email"], numero_documento=row["numero_documento"],
         rol=row["rol"], activo=row["activo"], propietario=row["propietario"], ultimo_login=row["ultimo_login"],
     )
 
@@ -67,14 +71,19 @@ def create_usuario(
     _require_propietario(current_user)
     conn = get_connection()
     try:
-        password_hash = hash_password(payload.password)
+        username = _make_username(conn, payload.email)
+        password_hash = hash_password(payload.numero_documento.strip())
         try:
             rows = conn.run(
                 "INSERT INTO usuarios "
-                "(username, nombre, email, password_hash, rol, activo, propietario, propietario_id) "
-                "VALUES (:username, :nombre, :email, :password_hash, :rol, :activo, false, :tid) "
+                "(username, nombre, apellido, telefono, email, numero_documento, password_hash, "
+                "rol, activo, propietario, propietario_id) "
+                "VALUES (:username, :nombre, :apellido, :telefono, :email, :numero_documento, :password_hash, "
+                ":rol, :activo, false, :tid) "
                 f"RETURNING {', '.join(STAFF_COLUMNS)}",
-                username=payload.username.strip(), nombre=payload.nombre.strip(), email=payload.email,
+                username=username, nombre=payload.nombre.strip(), apellido=payload.apellido.strip(),
+                telefono=payload.telefono.strip(), email=payload.email,
+                numero_documento=payload.numero_documento.strip(),
                 password_hash=password_hash, rol=payload.rol, activo=payload.activo, tid=tenant_id,
             )
         except DatabaseError as exc:
@@ -102,9 +111,12 @@ def update_usuario(
         if staff["propietario"]:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No puedes editar al propietario")
         rows = conn.run(
-            f"UPDATE usuarios SET nombre = :nombre, rol = :rol, activo = :activo "
+            f"UPDATE usuarios SET nombre = :nombre, apellido = :apellido, telefono = :telefono, "
+            f"numero_documento = :numero_documento, rol = :rol, activo = :activo "
             f"WHERE id = :id RETURNING {', '.join(STAFF_COLUMNS)}",
-            id=staff_id, nombre=payload.nombre.strip(), rol=payload.rol, activo=payload.activo,
+            id=staff_id, nombre=payload.nombre.strip(), apellido=payload.apellido.strip(),
+            telefono=payload.telefono.strip(), numero_documento=payload.numero_documento.strip(),
+            rol=payload.rol, activo=payload.activo,
         )
         return _row_to_staff(dict(zip(STAFF_COLUMNS, rows[0])))
     finally:
