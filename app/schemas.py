@@ -363,6 +363,61 @@ class InsumoEstadisticasOut(BaseModel):
     categorias: int
 
 
+EstadoActivoFijo = Literal["bueno", "regular", "danado", "perdido", "de_baja"]
+
+
+class ActivoFijoIn(BaseModel):
+    nombre: str = Field(min_length=1, max_length=100)
+    descripcion: str = Field(default="")
+    categoria: str = Field(default="otros", max_length=60)
+    cantidad: int = Field(ge=1, default=1)
+    ubicacion: str = Field(default="", max_length=100)
+    estado: EstadoActivoFijo = "bueno"
+    valor_unitario: float = Field(ge=0, default=0)
+    activo: bool = True
+
+
+class ActivoFijoActivoIn(BaseModel):
+    activo: bool
+
+
+class ActivoFijoEstadoIn(BaseModel):
+    estado: EstadoActivoFijo
+    cantidad: Optional[int] = Field(ge=1, default=None)
+    nota: str = Field(default="", max_length=500)
+
+
+class ActivoFijoOut(BaseModel):
+    id: int
+    nombre: str
+    descripcion: str
+    categoria: str
+    cantidad: int
+    ubicacion: str
+    estado: EstadoActivoFijo
+    valor_unitario: float
+    activo: bool
+    created_at: datetime
+
+
+class ActivoFijoEstadisticasOut(BaseModel):
+    total: int
+    activos: int
+    danados: int
+    categorias: int
+
+
+class ActivoFijoHistorialOut(BaseModel):
+    id: int
+    estado_anterior: EstadoActivoFijo
+    estado_nuevo: EstadoActivoFijo
+    cantidad_anterior: int
+    cantidad_nueva: int
+    nota: str
+    registrado_por: str
+    created_at: datetime
+
+
 class CategoriaRecetaIn(BaseModel):
     label: str = Field(min_length=1, max_length=100)
 
