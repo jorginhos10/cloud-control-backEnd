@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, status
 
 from app.database import get_connection
-from app.schemas import MenuDigitalDetalleOut, OrdenPublicaOut, PedidoIn, PedidoOut, VentaItemOut
+from app.schemas import MenuPublicoDetalleOut, OrdenPublicaOut, PedidoIn, PedidoOut, VentaItemOut
 from app.menu_digital import _get_items, _row_to_menu
 
 router = APIRouter(prefix="/menu")
@@ -31,12 +31,25 @@ def _get_menu_por_token(conn, token: str) -> dict:
     return row
 
 
-@router.get("/{token}", response_model=MenuDigitalDetalleOut)
+@router.get("/{token}", response_model=MenuPublicoDetalleOut)
 def ver_menu(token: str):
     conn = get_connection()
     try:
         row = _get_menu_por_token(conn, token)
-        return MenuDigitalDetalleOut(**_row_to_menu(row).model_dump(), items=_get_items(conn, row["id"]))
+
+        negocio_rows = conn.run(
+            "SELECT nombre, logo_url, eslogan FROM negocios WHERE usuario_id = :uid",
+            uid=row["usuario_id"],
+        )
+        negocio_nombre, negocio_logo_url, negocio_eslogan = negocio_rows[0] if negocio_rows else ("", None, "")
+
+        return MenuPublicoDetalleOut(
+            **_row_to_menu(row).model_dump(),
+            items=_get_items(conn, row["id"]),
+            negocio_nombre=negocio_nombre,
+            negocio_logo_url=negocio_logo_url,
+            negocio_eslogan=negocio_eslogan,
+        )
     finally:
         conn.close()
 

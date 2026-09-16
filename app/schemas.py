@@ -242,6 +242,12 @@ class CatalogoItemOut(BaseModel):
     disponible: Optional[int] = None
 
 
+class NegocioPublicoOut(BaseModel):
+    nombre: str = ""
+    logo_url: Optional[str] = None
+    eslogan: str = ""
+
+
 class CocinaItemOut(BaseModel):
     id: int
     nombre: str
@@ -563,6 +569,12 @@ class MenuItemOut(BaseModel):
 
 class MenuDigitalDetalleOut(MenuDigitalOut):
     items: list[MenuItemOut] = []
+
+
+class MenuPublicoDetalleOut(MenuDigitalDetalleOut):
+    negocio_nombre: str = ""
+    negocio_logo_url: Optional[str] = None
+    negocio_eslogan: str = ""
 
 
 class PedidoItemIn(BaseModel):
@@ -910,6 +922,12 @@ class ConfirmarTransaccionIn(BaseModel):
     transaction_id: str
 
 
+class SuscripcionPagoOut(BaseModel):
+    estado: str
+    plan: PlanPublicoOut
+    wompi: Optional[WompiCheckoutOut] = None
+
+
 class CuponValidarIn(BaseModel):
     codigo: str
     subtotal: float
@@ -1088,3 +1106,23 @@ class ConfiguracionImpresionIn(BaseModel):
     tamano_papel_comanda: TamanoPapel = Field(alias="tamanoPapelComanda")
 
     model_config = {"populate_by_name": True}
+
+
+class NegocioIn(BaseModel):
+    nombre: str = Field(default="", max_length=150)
+    tipo: str = Field(default="Restaurante", max_length=50)
+    moneda: str = Field(default="USD", max_length=3)
+    eslogan: str = Field(default="", max_length=200)
+    horario_apertura: str = Field(default="08:00", max_length=5)
+    horario_cierre: str = Field(default="22:00", max_length=5)
+    rut: str = Field(default="", max_length=50)
+    direccion: str = Field(default="", max_length=200)
+    ciudad: str = Field(default="", max_length=100)
+    telefono: str = Field(default="", max_length=30)
+    email: str = Field(default="", max_length=150)
+    sitio_web: str = Field(default="", max_length=200)
+    logo_url: Optional[str] = None
+
+
+class NegocioOut(NegocioIn):
+    updated_at: datetime

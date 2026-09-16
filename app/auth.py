@@ -1,10 +1,11 @@
 import os
 import re
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pg8000.exceptions import DatabaseError
 
+from app import geo
 from app.database import get_connection, get_superadmin_connection
 from app.schemas import CambiarPasswordIn, ImpersonateIn, LoginIn, PerfilUpdateIn, RegisterIn, TokenOut, UserOut
 from app.security import create_access_token, decode_access_token, hash_password, verify_password
@@ -57,16 +58,25 @@ def _row_to_user(row: dict) -> UserOut:
     )
 
 
-def _asignar_plan_predeterminado(conn, usuario_id: int) -> None:
+def _asignar_plan_predeterminado(conn, usuario_id: int, pais: str | None) -> None:
     """Best-effort: new signups get whichever plan the SuperAdmin marked as
-    automatic. Never blocks registration if the SuperAdmin database is down —
-    the restaurant just ends up without a plan, settable later from Suscripción."""
+    automatic for their country (falling back to any país's default plan if
+    theirs has none configured yet). Never blocks registration if the
+    SuperAdmin database is down — the restaurant just ends up without a
+    plan, settable later from Suscripción."""
     try:
         sconn = get_superadmin_connection()
     except Exception:
         return
     try:
-        rows = sconn.run("SELECT id FROM planes WHERE predeterminado = true AND activo = true LIMIT 1")
+        rows = []
+        if pais:
+            rows = sconn.run(
+                "SELECT id FROM planes WHERE predeterminado = true AND activo = true AND pais = :pais LIMIT 1",
+                pais=pais,
+            )
+        if not rows:
+            rows = sconn.run("SELECT id FROM planes WHERE predeterminado = true AND activo = true LIMIT 1")
         if not rows:
             return
         plan_id = rows[0][0]
@@ -91,7 +101,9 @@ def _make_username(conn, email: str) -> str:
 
 
 @router.post("/register", response_model=TokenOut, status_code=status.HTTP_201_CREATED)
-def register(payload: RegisterIn):
+def register(payload: RegisterIn, request: Request):
+    pais = geo.detectar_pais(request)
+
     conn = get_connection()
     try:
         existing = conn.run("SELECT 1 FROM usuarios WHERE email = :e", e=payload.email)
@@ -104,14 +116,15 @@ def register(payload: RegisterIn):
         try:
             rows = conn.run(
                 f"""
-                INSERT INTO usuarios (username, nombre, email, password_hash, rol, activo, propietario)
-                VALUES (:username, :nombre, :email, :password_hash, 'admin', true, true)
+                INSERT INTO usuarios (username, nombre, email, password_hash, rol, activo, propietario, pais)
+                VALUES (:username, :nombre, :email, :password_hash, 'admin', true, true, :pais)
                 RETURNING {", ".join(USER_COLUMNS)}
                 """,
                 username=username,
                 nombre=payload.full_name,
                 email=payload.email,
                 password_hash=password_hash,
+                pais=pais,
             )
         except DatabaseError as exc:
             if exc.args and exc.args[0].get("C") == UNIQUE_VIOLATION:
@@ -120,7 +133,7 @@ def register(payload: RegisterIn):
 
         user = _row_to_user(dict(zip(USER_COLUMNS, rows[0])))
         _seed_entorno_inicial(conn, user.id)
-        _asignar_plan_predeterminado(conn, user.id)
+        _asignar_plan_predeterminado(conn, user.id, pais)
         token = create_access_token(user_id=user.id, email=user.email)
         return TokenOut(access_token=token, user=user)
     finally:

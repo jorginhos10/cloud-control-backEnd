@@ -14,6 +14,7 @@ from app.schemas import (
     DomicilioChatMensajeOut,
     DomicilioOut,
     DomicilioPedidoIn,
+    NegocioPublicoOut,
 )
 
 router = APIRouter(prefix="/domicilio-publico")
@@ -39,6 +40,22 @@ def _resolver_usuario(conn, token: str) -> int:
     if not rows:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Enlace no encontrado")
     return rows[0][0]
+
+
+@router.get("/{token}/negocio", response_model=NegocioPublicoOut)
+def negocio(token: str):
+    conn = get_connection()
+    try:
+        usuario_id = _resolver_usuario(conn, token)
+        rows = conn.run(
+            "SELECT nombre, logo_url, eslogan FROM negocios WHERE usuario_id = :uid", uid=usuario_id
+        )
+        if not rows:
+            return NegocioPublicoOut()
+        nombre, logo_url, eslogan = rows[0]
+        return NegocioPublicoOut(nombre=nombre, logo_url=logo_url, eslogan=eslogan)
+    finally:
+        conn.close()
 
 
 @router.get("/{token}/catalogo", response_model=list[CatalogoItemOut])

@@ -22,6 +22,7 @@ from app.insumos import router as insumos_router
 from app.mesas import router as mesas_router
 from app.marketplace import router as marketplace_router
 from app.menu_digital import router as menu_digital_router
+from app.negocios import router as negocios_router
 from app.menu_publico import router as menu_publico_router
 from app.pqrs import router as pqrs_router
 from app.pqrs_publico import router as pqrs_publico_router
@@ -60,6 +61,7 @@ app.include_router(insumos_router)
 app.include_router(recetas_router)
 app.include_router(ingresos_router)
 app.include_router(menu_digital_router)
+app.include_router(negocios_router)
 app.include_router(menu_publico_router)
 app.include_router(pqrs_router)
 app.include_router(pqrs_publico_router)
