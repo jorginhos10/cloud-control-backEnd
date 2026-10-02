@@ -16,7 +16,7 @@ NEGOCIO_EDIT_COLUMNS = [
 NEGOCIO_COLUMNS = NEGOCIO_EDIT_COLUMNS + ["updated_at"]
 
 # Debe reflejar exactamente los AparienciaId que existen en este front.
-APARIENCIAS_CONOCIDAS = ["violet-original", "violet-tableta", "halloween", "navidad", "modo-nocturno"]
+APARIENCIAS_CONOCIDAS = ["automatico", "violet-original", "violet-tableta", "halloween", "navidad", "modo-nocturno"]
 
 
 def _apariencias_permitidas(tenant_id: int) -> list[str]:
@@ -117,12 +117,32 @@ def guardar_negocio(payload: NegocioIn, current_user: UserOut = Depends(require_
         conn.close()
 
 
+def _tema_automatico_default() -> str:
+    """Estilo que el SuperAdmin marco con la estrella en Apariencias > Sistema: es a lo que
+    cae "Automático" fuera de temporada (Halloween/Navidad). Si el SuperAdmin no responde,
+    usamos el estilo por defecto de siempre."""
+    try:
+        sconn = get_superadmin_connection()
+    except Exception:
+        return "violet-original"
+    try:
+        rows = sconn.run("SELECT apariencia_key FROM apariencia_automatico WHERE id = 1")
+        return rows[0][0] if rows else "violet-original"
+    except Exception:
+        return "violet-original"
+    finally:
+        sconn.close()
+
+
 @router.get("/apariencia", response_model=NegocioAparienciaOut)
 def get_apariencia(current_user: UserOut = Depends(get_current_user)):
     conn = get_connection()
     try:
         rows = conn.run("SELECT apariencia FROM negocios WHERE usuario_id = :id", id=current_user.tenant_id)
-        return NegocioAparienciaOut(apariencia=rows[0][0] if rows else "violet-original")
+        return NegocioAparienciaOut(
+            apariencia=rows[0][0] if rows else "violet-original",
+            automatico_default=_tema_automatico_default(),
+        )
     finally:
         conn.close()
 

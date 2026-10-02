@@ -1223,6 +1223,9 @@ class NegocioAparienciaIn(BaseModel):
 
 class NegocioAparienciaOut(BaseModel):
     apariencia: str
+    automatico_default: str = Field(default="violet-original", serialization_alias="automaticoDefault")
+
+    model_config = {"populate_by_name": True}
 
 
 AmbienteDian = Literal["habilitacion", "produccion"]
