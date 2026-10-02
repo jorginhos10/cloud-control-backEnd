@@ -459,6 +459,20 @@ class RecetaIngredienteIn(BaseModel):
     cantidad: float = Field(gt=0)
 
 
+class SaborIn(BaseModel):
+    nombre: str = Field(min_length=1, max_length=80)
+
+
+class SaborActivoIn(BaseModel):
+    activo: bool
+
+
+class SaborOut(BaseModel):
+    id: int
+    nombre: str
+    activo: bool
+
+
 class RecetaIn(BaseModel):
     nombre: str = Field(min_length=1, max_length=150)
     descripcion: str = Field(default="")
@@ -469,6 +483,7 @@ class RecetaIn(BaseModel):
     activo: bool = True
     imagen_url: Optional[str] = None
     ingredientes: list[RecetaIngredienteIn] = []
+    sabores: list[int] = []
 
 
 class RecetaActivoIn(BaseModel):
@@ -495,6 +510,7 @@ class RecetaOut(BaseModel):
     created_at: datetime
     imagen_url: Optional[str] = None
     ingredientes: list[RecetaIngredienteOut] = []
+    sabores: list[SaborOut] = []
     costo_total: float
     margen: float
 

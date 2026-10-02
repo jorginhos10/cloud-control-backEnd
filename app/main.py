@@ -35,6 +35,7 @@ from app.perdidas import router as perdidas_router
 from app.proveedores import router as proveedores_router
 from app.recetas import router as recetas_router
 from app.reportes import router as reportes_router
+from app.sabores import router as sabores_router
 from app.soporte import router as soporte_router
 from app.suscripcion import router as suscripcion_router
 from app.usuarios import router as usuarios_router
@@ -65,6 +66,7 @@ app.include_router(ventas_router)
 app.include_router(clientes_router)
 app.include_router(insumos_router)
 app.include_router(recetas_router)
+app.include_router(sabores_router)
 app.include_router(ingresos_router)
 app.include_router(menu_digital_router)
 app.include_router(negocios_router)

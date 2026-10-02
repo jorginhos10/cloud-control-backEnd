@@ -14,6 +14,7 @@ from app.schemas import (
     RecetaIn,
     RecetaIngredienteOut,
     RecetaOut,
+    SaborOut,
 )
 
 router = APIRouter(prefix="/recetas", dependencies=[Depends(get_current_user)])
@@ -32,6 +33,14 @@ INGREDIENTE_SELECT = """
     JOIN insumos i ON i.id = ri.id_insumo
     WHERE ri.id_receta = :id_receta
     ORDER BY i.nombre
+"""
+
+SABOR_DE_RECETA_SELECT = """
+    SELECT s.id, s.nombre, s.activo
+    FROM receta_sabores rs
+    JOIN sabores s ON s.id = rs.id_sabor
+    WHERE rs.id_receta = :id_receta
+    ORDER BY s.nombre
 """
 
 
@@ -148,6 +157,11 @@ def _get_ingredientes(conn, receta_id: int) -> list[RecetaIngredienteOut]:
     ]
 
 
+def _get_sabores(conn, receta_id: int) -> list[SaborOut]:
+    rows = conn.run(SABOR_DE_RECETA_SELECT, id_receta=receta_id)
+    return [SaborOut(id=r[0], nombre=r[1], activo=r[2]) for r in rows]
+
+
 def _row_to_receta(conn, row: dict) -> RecetaOut:
     ingredientes = _get_ingredientes(conn, row["id"])
     costo_total = round(sum(i.costo for i in ingredientes), 2)
@@ -157,7 +171,7 @@ def _row_to_receta(conn, row: dict) -> RecetaOut:
         categoria=row["categoria_key"], tiempo_preparacion=row["tiempo_preparacion"],
         porciones=row["porciones"], precio_venta=precio_venta, activo=row["activo"],
         created_at=row["created_at"], imagen_url=row["imagen_url"],
-        ingredientes=ingredientes, costo_total=costo_total,
+        ingredientes=ingredientes, sabores=_get_sabores(conn, row["id"]), costo_total=costo_total,
         margen=round(precio_venta - costo_total, 2),
     )
 
@@ -234,6 +248,20 @@ def _set_ingredientes(conn, usuario_id: int, receta_id: int, ingredientes) -> No
         )
 
 
+def _set_sabores(conn, usuario_id: int, receta_id: int, sabor_ids: list[int]) -> None:
+    conn.run("DELETE FROM receta_sabores WHERE id_receta = :id", id=receta_id)
+    for sabor_id in set(sabor_ids):
+        existe = conn.run(
+            "SELECT 1 FROM sabores WHERE id = :id AND usuario_id = :uid", id=sabor_id, uid=usuario_id
+        )
+        if not existe:
+            continue
+        conn.run(
+            "INSERT INTO receta_sabores (id_receta, id_sabor) VALUES (:receta, :sabor)",
+            receta=receta_id, sabor=sabor_id,
+        )
+
+
 @router.get("/{receta_id}", response_model=RecetaOut)
 def get_receta(receta_id: int, current_user: UserOut = Depends(get_current_user)):
     conn = get_connection()
@@ -265,6 +293,7 @@ def create_receta(payload: RecetaIn, current_user: UserOut = Depends(get_current
         )
         receta_id = rows[0][0]
         _set_ingredientes(conn, current_user.tenant_id, receta_id, payload.ingredientes)
+        _set_sabores(conn, current_user.tenant_id, receta_id, payload.sabores)
         return _row_to_receta(conn, _get_receta_or_404(conn, current_user.tenant_id, receta_id))
     finally:
         conn.close()
@@ -293,6 +322,7 @@ def update_receta(receta_id: int, payload: RecetaIn, current_user: UserOut = Dep
             imagen_url=payload.imagen_url,
         )
         _set_ingredientes(conn, current_user.tenant_id, receta_id, payload.ingredientes)
+        _set_sabores(conn, current_user.tenant_id, receta_id, payload.sabores)
         return _row_to_receta(conn, _get_receta_or_404(conn, current_user.tenant_id, receta_id))
     finally:
         conn.close()
