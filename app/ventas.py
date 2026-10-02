@@ -505,6 +505,7 @@ POR_PAGINA = 25
 def listado_ventas(
     buscar: str = Query(default=""),
     estado: str = Query(default=""),
+    tipo: str = Query(default=""),
     desde: date | None = Query(default=None),
     hasta: date | None = Query(default=None),
     pagina: int = Query(default=1, ge=1),
@@ -516,43 +517,48 @@ def listado_ventas(
         hoy = date.today()
         desde = desde or hoy
         hasta = hasta or hoy
+        items: list[VentaListadoItemOut] = []
 
-        clauses = ["v.usuario_id = :uid", "v.fecha_apertura::date BETWEEN :desde AND :hasta"]
-        params: dict = {"uid": current_user.tenant_id, "desde": desde, "hasta": hasta}
-        if propias:
-            clauses.append("v.creado_por_id = :cid")
-            params["cid"] = current_user.id
-        if estado:
-            clauses.append("v.estado = :estado")
-            params["estado"] = estado
-        if buscar.strip():
-            clauses.append("(CAST(v.id AS TEXT) ILIKE :buscar OR CAST(m.numero AS TEXT) ILIKE :buscar)")
-            params["buscar"] = f"%{buscar.strip()}%"
-        where_sql = " AND ".join(clauses)
+        if tipo in ("", "mesa", "directa"):
+            clauses = ["v.usuario_id = :uid", "v.fecha_apertura::date BETWEEN :desde AND :hasta"]
+            params: dict = {"uid": current_user.tenant_id, "desde": desde, "hasta": hasta}
+            if propias:
+                clauses.append("v.creado_por_id = :cid")
+                params["cid"] = current_user.id
+            if estado:
+                clauses.append("v.estado = :estado")
+                params["estado"] = estado
+            if tipo:
+                clauses.append("v.tipo = :tipo")
+                params["tipo"] = tipo
+            if buscar.strip():
+                clauses.append("(CAST(v.id AS TEXT) ILIKE :buscar OR CAST(m.numero AS TEXT) ILIKE :buscar)")
+                params["buscar"] = f"%{buscar.strip()}%"
+            where_sql = " AND ".join(clauses)
 
-        rows = conn.run(
-            f"SELECT v.id, v.fecha_apertura, v.tipo, v.estado, m.numero AS mesa_numero, "
-            f"COALESCE(ic.cnt, 0) AS platos, v.total, v.metodo_pago "
-            f"FROM ventas v "
-            f"LEFT JOIN mesas m ON m.id = v.mesa_id "
-            f"LEFT JOIN (SELECT venta_id, COALESCE(SUM(cantidad), 0) AS cnt FROM venta_items GROUP BY venta_id) ic "
-            f"ON ic.venta_id = v.id "
-            f"WHERE {where_sql} "
-            f"ORDER BY v.fecha_apertura DESC",
-            **params,
-        )
-        items = [
-            VentaListadoItemOut(
-                id=r[0], fecha=r[1], tipo=r[2], estado=r[3], mesa_numero=r[4],
-                platos=r[5], total=float(r[6]), metodo_pago=r[7] or None,
+            rows = conn.run(
+                f"SELECT v.id, v.fecha_apertura, v.tipo, v.estado, m.numero AS mesa_numero, "
+                f"COALESCE(ic.cnt, 0) AS platos, v.total, v.metodo_pago "
+                f"FROM ventas v "
+                f"LEFT JOIN mesas m ON m.id = v.mesa_id "
+                f"LEFT JOIN (SELECT venta_id, COALESCE(SUM(cantidad), 0) AS cnt FROM venta_items GROUP BY venta_id) ic "
+                f"ON ic.venta_id = v.id "
+                f"WHERE {where_sql} "
+                f"ORDER BY v.fecha_apertura DESC",
+                **params,
             )
-            for r in rows
-        ]
+            items = [
+                VentaListadoItemOut(
+                    id=r[0], fecha=r[1], tipo=r[2], estado=r[3], mesa_numero=r[4],
+                    platos=r[5], total=float(r[6]), metodo_pago=r[7] or None,
+                )
+                for r in rows
+            ]
 
         # Los domicilios entregados cuentan como una venta más (cerrada): no tienen mesa ni
-        # "creado_por_id", así que se dejan afuera si se filtra por "mis ventas" o por un
-        # estado que no sea el de cerrada/cobrada.
-        if not propias and estado in ("", "cerrada"):
+        # "creado_por_id", así que se dejan afuera si se filtra por "mis ventas", por un
+        # estado que no sea el de cerrada/cobrada, o por un tipo que no sea "domicilio".
+        if tipo in ("", "domicilio") and not propias and estado in ("", "cerrada"):
             d_clauses = [
                 "d.usuario_id = :uid", "d.estado = 'entregado'", "d.created_at::date BETWEEN :desde AND :hasta",
             ]
