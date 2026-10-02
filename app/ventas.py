@@ -30,7 +30,7 @@ from app.schemas import (
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
 
-ACTIVOS = ("abierta", "en_preparacion", "lista")
+ACTIVOS = ("abierta", "en_preparacion", "lista", "entregada")
 
 SALON_COLUMNS = [
     "id", "numero", "nombre", "capacidad", "zona_key", "estado", "activo",
@@ -319,7 +319,7 @@ COCINA_HISTORIAL_SELECT = """
     FROM ventas
     LEFT JOIN mesas ON mesas.id = ventas.mesa_id
     LEFT JOIN zonas ON zonas.id = mesas.zona_id
-    WHERE ventas.usuario_id = :uid AND ventas.estado IN ('cerrada', 'cancelada')
+    WHERE ventas.usuario_id = :uid AND ventas.estado IN ('cerrada', 'cancelada', 'entregada')
       AND COALESCE(ventas.fecha_cierre, ventas.fecha_apertura)::date = :hoy
     ORDER BY COALESCE(ventas.fecha_cierre, ventas.fecha_apertura) DESC
 """
@@ -530,15 +530,6 @@ def listado_ventas(
             params["buscar"] = f"%{buscar.strip()}%"
         where_sql = " AND ".join(clauses)
 
-        totales = conn.run(
-            f"SELECT COUNT(DISTINCT v.id), COALESCE(SUM(v.total), 0) FROM ventas v "
-            f"LEFT JOIN mesas m ON m.id = v.mesa_id WHERE {where_sql}",
-            **params,
-        )[0]
-        total, monto_total = totales[0], float(totales[1])
-        total_paginas = max(1, -(-total // POR_PAGINA))
-
-        offset = (pagina - 1) * POR_PAGINA
         rows = conn.run(
             f"SELECT v.id, v.fecha_apertura, v.tipo, v.estado, m.numero AS mesa_numero, "
             f"COALESCE(ic.cnt, 0) AS platos, v.total, v.metodo_pago "
@@ -547,16 +538,50 @@ def listado_ventas(
             f"LEFT JOIN (SELECT venta_id, COALESCE(SUM(cantidad), 0) AS cnt FROM venta_items GROUP BY venta_id) ic "
             f"ON ic.venta_id = v.id "
             f"WHERE {where_sql} "
-            f"ORDER BY v.fecha_apertura DESC LIMIT :limit OFFSET :offset",
-            limit=POR_PAGINA, offset=offset, **params,
+            f"ORDER BY v.fecha_apertura DESC",
+            **params,
         )
         items = [
             VentaListadoItemOut(
                 id=r[0], fecha=r[1], tipo=r[2], estado=r[3], mesa_numero=r[4],
-                platos=r[5], total=float(r[6]), metodo_pago=r[7],
+                platos=r[5], total=float(r[6]), metodo_pago=r[7] or None,
             )
             for r in rows
         ]
+
+        # Los domicilios entregados cuentan como una venta más (cerrada): no tienen mesa ni
+        # "creado_por_id", así que se dejan afuera si se filtra por "mis ventas" o por un
+        # estado que no sea el de cerrada/cobrada.
+        if not propias and estado in ("", "cerrada"):
+            d_clauses = [
+                "d.usuario_id = :uid", "d.estado = 'entregado'", "d.created_at::date BETWEEN :desde AND :hasta",
+            ]
+            d_params: dict = {"uid": current_user.tenant_id, "desde": desde, "hasta": hasta}
+            if buscar.strip():
+                d_clauses.append("(CAST(d.id AS TEXT) ILIKE :buscar OR d.nombre_cliente ILIKE :buscar)")
+                d_params["buscar"] = f"%{buscar.strip()}%"
+            d_rows = conn.run(
+                f"SELECT d.id, d.created_at, COALESCE(ic.cnt, 0) AS platos, d.total, d.metodo_pago "
+                f"FROM domicilios d "
+                f"LEFT JOIN (SELECT domicilio_id, COALESCE(SUM(cantidad), 0) AS cnt FROM domicilio_items GROUP BY domicilio_id) ic "
+                f"ON ic.domicilio_id = d.id "
+                f"WHERE {' AND '.join(d_clauses)}",
+                **d_params,
+            )
+            items += [
+                VentaListadoItemOut(
+                    id=r[0], fecha=r[1], tipo="domicilio", estado="cerrada", mesa_numero=None,
+                    platos=r[2], total=float(r[3]), metodo_pago=r[4] or None,
+                )
+                for r in d_rows
+            ]
+
+        items.sort(key=lambda i: i.fecha, reverse=True)
+        total = len(items)
+        monto_total = sum(i.total for i in items)
+        total_paginas = max(1, -(-total // POR_PAGINA))
+        offset = (pagina - 1) * POR_PAGINA
+        items = items[offset: offset + POR_PAGINA]
 
         return VentaListadoOut(
             items=items, total=total, monto_total=monto_total, pagina=pagina, total_paginas=total_paginas
@@ -580,7 +605,7 @@ def ventas_por_mesa(mesa_id: int, current_user: UserOut = Depends(get_current_us
     try:
         rows = conn.run(
             "SELECT id FROM ventas WHERE mesa_id = :mid AND usuario_id = :uid "
-            "AND estado IN ('abierta','en_preparacion','lista') ORDER BY fecha_apertura",
+            "AND estado IN ('abierta','en_preparacion','lista','entregada') ORDER BY fecha_apertura",
             mid=mesa_id, uid=current_user.tenant_id,
         )
         return [_get_venta_con_items(conn, current_user.tenant_id, r[0]) for r in rows]
@@ -648,7 +673,7 @@ def abrir_orden(payload: VentaCrearIn, current_user: UserOut = Depends(get_curre
 
         existente = conn.run(
             "SELECT id FROM ventas WHERE mesa_id = :mid AND usuario_id = :uid "
-            "AND estado IN ('abierta','en_preparacion','lista') ORDER BY fecha_apertura LIMIT 1",
+            "AND estado IN ('abierta','en_preparacion','lista','entregada') ORDER BY fecha_apertura LIMIT 1",
             mid=payload.mesa_id, uid=current_user.tenant_id,
         )
         if existente:
@@ -737,6 +762,10 @@ def agregar_item(venta_id: int, payload: VentaItemIn, current_user: UserOut = De
                     precio=precio_venta,
                     subtotal=subtotal,
                 )
+            # Un pedido nuevo en una orden ya servida/lista es comida que falta por preparar:
+            # vuelve a "abierta" para que cocina la vea de nuevo en su tablero.
+            if venta["estado"] in ("lista", "entregada"):
+                conn.run("UPDATE ventas SET estado = 'abierta' WHERE id = :id", id=venta_id)
             _recalcular_total(conn, venta_id)
             conn.run("COMMIT")
         except Exception:
@@ -782,6 +811,9 @@ def actualizar_cantidad_item(
                 subtotal=round(payload.cantidad * float(precio_unitario), 2),
                 id=item_id,
             )
+            # Pedir más de algo ya servido/listo es comida nueva por preparar.
+            if delta > 0 and venta["estado"] in ("lista", "entregada"):
+                conn.run("UPDATE ventas SET estado = 'abierta' WHERE id = :id", id=venta_id)
             _recalcular_total(conn, venta_id)
             conn.run("COMMIT")
         except Exception:
@@ -913,9 +945,12 @@ def quitar_cupon(venta_id: int, current_user: UserOut = Depends(get_current_user
 
 
 # Solo avanza, nunca retrocede: "lista" no puede volver a "en_preparacion" vía esta ruta.
+# "entregada" = ya se sirvió en la mesa; la cuenta sigue abierta (puede seguir pidiendo),
+# pero cocina ya no necesita verla en su tablero.
 _TRANSICIONES_VENTA_COCINA = {
     "abierta": {"en_preparacion"},
     "en_preparacion": {"lista"},
+    "lista": {"entregada"},
 }
 
 

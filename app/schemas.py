@@ -144,8 +144,8 @@ class CodigoDisponibleOut(BaseModel):
     disponible: Optional[bool]
 
 
-EstadoVenta = Literal["abierta", "en_preparacion", "lista", "cerrada", "cancelada"]
-TipoVenta = Literal["mesa", "directa"]
+EstadoVenta = Literal["abierta", "en_preparacion", "lista", "entregada", "cerrada", "cancelada"]
+TipoVenta = Literal["mesa", "directa", "domicilio"]
 MetodoPago = Literal["efectivo", "tarjeta", "transferencia", "mixto"]
 
 

@@ -210,7 +210,7 @@ def update_mesa_estado(mesa_id: int, payload: MesaEstadoIn, current_user: UserOu
         if payload.estado == "disponible":
             activa = conn.run(
                 "SELECT 1 FROM ventas WHERE mesa_id = :id AND usuario_id = :uid "
-                "AND estado IN ('abierta', 'en_preparacion', 'lista')",
+                "AND estado IN ('abierta', 'en_preparacion', 'lista', 'entregada')",
                 id=mesa_id, uid=current_user.tenant_id,
             )
             if activa:
