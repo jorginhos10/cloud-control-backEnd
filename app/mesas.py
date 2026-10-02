@@ -207,6 +207,17 @@ def update_mesa_estado(mesa_id: int, payload: MesaEstadoIn, current_user: UserOu
     conn = get_connection()
     try:
         _get_mesa_or_404(conn, current_user.tenant_id, mesa_id)
+        if payload.estado == "disponible":
+            activa = conn.run(
+                "SELECT 1 FROM ventas WHERE mesa_id = :id AND usuario_id = :uid "
+                "AND estado IN ('abierta', 'en_preparacion', 'lista')",
+                id=mesa_id, uid=current_user.tenant_id,
+            )
+            if activa:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Esta mesa todavía tiene una orden abierta; ciérrala o cóbrala antes de liberarla",
+                )
         conn.run(
             "UPDATE mesas SET estado = :estado WHERE id = :id AND usuario_id = :uid",
             id=mesa_id, uid=current_user.tenant_id, estado=payload.estado,

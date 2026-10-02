@@ -4,10 +4,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.activos_fijos import router as activos_fijos_router
+from app.apariencia_login import router as apariencia_login_router
 from app.auth import router as auth_router
 from app.chat_soporte import router as chat_soporte_router
 from app.clientes import router as clientes_router
@@ -17,12 +18,16 @@ from app.dashboard import router as dashboard_router
 from app.database import get_connection
 from app.domicilio_publico import router as domicilio_publico_router
 from app.domicilios import router as domicilios_router
+from app.facturacion_electronica import router as facturacion_electronica_router
 from app.ingresos import router as ingresos_router
 from app.insumos import router as insumos_router
 from app.mesas import router as mesas_router
 from app.marketplace import router as marketplace_router
 from app.menu_digital import router as menu_digital_router
+from app.modulos import guardia_de_modulos
 from app.negocios import router as negocios_router
+from app.nomina import router as nomina_router
+from app.onboarding import router as onboarding_router
 from app.menu_publico import router as menu_publico_router
 from app.pqrs import router as pqrs_router
 from app.pqrs_publico import router as pqrs_publico_router
@@ -36,7 +41,7 @@ from app.usuarios import router as usuarios_router
 from app.ventas import router as ventas_router
 from app.webhooks import router as webhooks_router
 
-app = FastAPI(title="ChefControl API")
+app = FastAPI(title="ChefControl API", dependencies=[Depends(guardia_de_modulos)])
 
 origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",")]
 
@@ -50,6 +55,7 @@ app.add_middleware(
 
 
 app.include_router(auth_router)
+app.include_router(apariencia_login_router)
 app.include_router(activos_fijos_router)
 app.include_router(chat_soporte_router)
 app.include_router(dashboard_router)
@@ -62,6 +68,7 @@ app.include_router(recetas_router)
 app.include_router(ingresos_router)
 app.include_router(menu_digital_router)
 app.include_router(negocios_router)
+app.include_router(onboarding_router)
 app.include_router(menu_publico_router)
 app.include_router(pqrs_router)
 app.include_router(pqrs_publico_router)
@@ -72,7 +79,9 @@ app.include_router(marketplace_router)
 app.include_router(proveedores_router)
 app.include_router(perdidas_router)
 app.include_router(usuarios_router)
+app.include_router(nomina_router)
 app.include_router(configuracion_router)
+app.include_router(facturacion_electronica_router)
 app.include_router(webhooks_router)
 app.include_router(suscripcion_router)
 app.include_router(soporte_router)

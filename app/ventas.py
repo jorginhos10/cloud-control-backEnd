@@ -12,6 +12,8 @@ from app.schemas import (
     PropinaItemOut,
     SalonEstadisticasOut,
     SalonMesaOut,
+    MesaCambioIn,
+    VentaClienteIn,
     VentaCobrarIn,
     VentaCrearIn,
     VentaCuponIn,
@@ -218,7 +220,11 @@ COCINA_ORDENES_SELECT = """
     FROM ventas
     LEFT JOIN mesas ON mesas.id = ventas.mesa_id
     LEFT JOIN zonas ON zonas.id = mesas.zona_id
-    WHERE ventas.usuario_id = :uid AND ventas.estado IN ('abierta', 'en_preparacion', 'lista')
+    WHERE ventas.usuario_id = :uid AND (
+        ventas.estado IN ('abierta', 'en_preparacion', 'lista')
+        -- Las canceladas hace poco se envían también para que la cocina avise que se canceló la preparación.
+        OR (ventas.estado = 'cancelada' AND ventas.fecha_cierre > now() - interval '3 minutes')
+    )
     ORDER BY ventas.fecha_apertura ASC
 """
 
@@ -231,22 +237,77 @@ COCINA_ITEMS_SELECT = """
     ORDER BY categoria, vi.nombre
 """
 
+# Los domicilios ya aprobados (estado "preparacion") o listos entran a la misma pantalla de
+# cocina que las ventas; los "pendiente" siguen esperando la aprobación del negocio en Domicilios.
+DOMICILIO_ORDENES_SELECT = """
+    SELECT id, tipo, estado, notas, created_at, nombre_cliente, direccion
+    FROM domicilios
+    WHERE usuario_id = :uid AND (
+        estado IN ('preparacion', 'listo')
+        OR (estado = 'cancelado' AND updated_at > now() - interval '3 minutes')
+    )
+    ORDER BY created_at ASC
+"""
+
+DOMICILIO_ITEMS_SELECT = """
+    SELECT di.id, di.nombre, di.cantidad, COALESCE(rc.label, 'Otro') AS categoria
+    FROM domicilio_items di
+    LEFT JOIN recetas r ON r.id = di.receta_id
+    LEFT JOIN receta_categorias rc ON rc.id = r.categoria_id
+    WHERE di.domicilio_id = :id
+    ORDER BY categoria, di.nombre
+"""
+
+# El estado de un domicilio no comparte enum con el de una venta; se traduce al que ya
+# entienden las columnas de cocina (pendiente no aplica: nunca llega a esta pantalla).
+_ESTADO_DOMICILIO_A_COCINA = {"preparacion": "en_preparacion", "listo": "lista", "cancelado": "cancelada"}
+
+
+def _cocina_ordenes_de_ventas(conn, uid: int) -> list[CocinaOrdenOut]:
+    rows = conn.run(COCINA_ORDENES_SELECT, uid=uid)
+    ordenes = []
+    for r in rows:
+        item_rows = conn.run(COCINA_ITEMS_SELECT, id=r[0])
+        ordenes.append(
+            CocinaOrdenOut(
+                id=r[0], tipo=r[1], estado=r[2], notas=r[3], fecha_apertura=r[4],
+                mesa_numero=r[5], mesa_nombre=r[6], mesa_zona=r[7],
+                items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3]) for i in item_rows],
+            )
+        )
+    return ordenes
+
+
+def _cocina_ordenes_de_domicilios(conn, uid: int) -> list[CocinaOrdenOut]:
+    rows = conn.run(DOMICILIO_ORDENES_SELECT, uid=uid)
+    ordenes = []
+    for r in rows:
+        item_rows = conn.run(DOMICILIO_ITEMS_SELECT, id=r[0])
+        ordenes.append(
+            CocinaOrdenOut(
+                id=r[0], tipo=r[1], estado=_ESTADO_DOMICILIO_A_COCINA[r[2]], notas=r[3] or "", fecha_apertura=r[4],
+                items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3]) for i in item_rows],
+                origen="domicilio", cliente_nombre=r[5], direccion=r[6],
+            )
+        )
+    return ordenes
+
+
+def _orden_sort_key(orden: CocinaOrdenOut):
+    # ventas.fecha_apertura trae zona horaria; domicilios.created_at no — sin normalizar,
+    # comparar ambas revienta con "can't compare offset-naive and offset-aware datetimes".
+    fecha = orden.fecha_apertura
+    return fecha.replace(tzinfo=None) if fecha.tzinfo else fecha
+
 
 @router.get("/cocina/ordenes", response_model=list[CocinaOrdenOut])
 def cocina_ordenes(current_user: UserOut = Depends(get_current_user)):
     conn = get_connection()
     try:
-        rows = conn.run(COCINA_ORDENES_SELECT, uid=current_user.tenant_id)
-        ordenes = []
-        for r in rows:
-            item_rows = conn.run(COCINA_ITEMS_SELECT, id=r[0])
-            ordenes.append(
-                CocinaOrdenOut(
-                    id=r[0], tipo=r[1], estado=r[2], notas=r[3], fecha_apertura=r[4],
-                    mesa_numero=r[5], mesa_nombre=r[6], mesa_zona=r[7],
-                    items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3]) for i in item_rows],
-                )
-            )
+        ordenes = _cocina_ordenes_de_ventas(conn, current_user.tenant_id) + _cocina_ordenes_de_domicilios(
+            conn, current_user.tenant_id
+        )
+        ordenes.sort(key=_orden_sort_key)
         return ordenes
     finally:
         conn.close()
@@ -263,12 +324,23 @@ COCINA_HISTORIAL_SELECT = """
     ORDER BY COALESCE(ventas.fecha_cierre, ventas.fecha_apertura) DESC
 """
 
+DOMICILIO_HISTORIAL_SELECT = """
+    SELECT id, tipo, estado, notas, created_at, nombre_cliente, direccion
+    FROM domicilios
+    WHERE usuario_id = :uid AND estado IN ('entregado', 'cancelado')
+      AND updated_at::date = :hoy
+    ORDER BY updated_at DESC
+"""
+
+_ESTADO_DOMICILIO_A_HISTORIAL = {"entregado": "cerrada", "cancelado": "cancelada"}
+
 
 @router.get("/cocina/historial", response_model=list[CocinaOrdenOut])
 def cocina_historial(current_user: UserOut = Depends(get_current_user)):
     conn = get_connection()
     try:
-        rows = conn.run(COCINA_HISTORIAL_SELECT, uid=current_user.tenant_id, hoy=date.today())
+        hoy = date.today()
+        rows = conn.run(COCINA_HISTORIAL_SELECT, uid=current_user.tenant_id, hoy=hoy)
         ordenes = []
         for r in rows:
             item_rows = conn.run(COCINA_ITEMS_SELECT, id=r[0])
@@ -279,6 +351,17 @@ def cocina_historial(current_user: UserOut = Depends(get_current_user)):
                     items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3]) for i in item_rows],
                 )
             )
+
+        dom_rows = conn.run(DOMICILIO_HISTORIAL_SELECT, uid=current_user.tenant_id, hoy=hoy)
+        for r in dom_rows:
+            item_rows = conn.run(DOMICILIO_ITEMS_SELECT, id=r[0])
+            ordenes.append(
+                CocinaOrdenOut(
+                    id=r[0], tipo=r[1], estado=_ESTADO_DOMICILIO_A_HISTORIAL[r[2]], notas=r[3] or "", fecha_apertura=r[4],
+                    items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3]) for i in item_rows],
+                    origen="domicilio", cliente_nombre=r[5], direccion=r[6],
+                )
+            )
         return ordenes
     finally:
         conn.close()
@@ -287,7 +370,7 @@ def cocina_historial(current_user: UserOut = Depends(get_current_user)):
 VENTA_COLUMNS = [
     "id", "mesa_id", "tipo", "estado", "total", "descuento", "cupon_id", "cupon_codigo",
     "notas", "metodo_pago", "pago_efectivo", "pago_tarjeta", "pago_transferencia", "propina",
-    "fecha_apertura", "fecha_cierre",
+    "fecha_apertura", "fecha_cierre", "cliente_id",
 ]
 ITEM_COLUMNS = ["id", "receta_id", "nombre", "cantidad", "precio_unitario", "subtotal"]
 
@@ -312,6 +395,10 @@ def _get_venta_con_items(conn, usuario_id: int, venta_id: int) -> VentaOut:
         f"SELECT {', '.join(ITEM_COLUMNS)} FROM venta_items WHERE venta_id = :id ORDER BY creado_en",
         id=venta_id,
     )
+    cliente_nombre = None
+    if v["cliente_id"] is not None:
+        cliente_rows = conn.run("SELECT nombre FROM clientes WHERE id = :id", id=v["cliente_id"])
+        cliente_nombre = cliente_rows[0][0] if cliente_rows else None
     return VentaOut(
         id=v["id"],
         mesa_id=v["mesa_id"],
@@ -328,6 +415,8 @@ def _get_venta_con_items(conn, usuario_id: int, venta_id: int) -> VentaOut:
         propina=float(v["propina"]),
         fecha_apertura=v["fecha_apertura"],
         fecha_cierre=v["fecha_cierre"],
+        cliente_id=v["cliente_id"],
+        cliente_nombre=cliente_nombre,
         items=[_row_to_item(r) for r in item_rows],
     )
 
@@ -356,6 +445,43 @@ def _recalcular_total(conn, venta_id: int) -> None:
     descuento = round(descuento, 2)
     total = round(max(0.0, subtotal_total - descuento), 2)
     conn.run("UPDATE ventas SET descuento = :d, total = :t WHERE id = :id", d=descuento, t=total, id=venta_id)
+
+
+def _consumo_de_receta(conn, receta_id: int, cantidad: float) -> dict[int, float]:
+    """Cuánto de cada insumo necesitan `cantidad` unidades de esta receta."""
+    filas = conn.run("SELECT id_insumo, cantidad FROM receta_insumos WHERE id_receta = :id", id=receta_id)
+    return {id_insumo: float(cant_receta) * cantidad for id_insumo, cant_receta in filas}
+
+
+def _consumir_stock(conn, consumo: dict[int, float]) -> None:
+    """Descuenta stock para estos insumos, bloqueando sus filas (FOR UPDATE) para que dos
+    pedidos concurrentes por el mismo ingrediente no pasen ambos la validación antes de que
+    ninguno haya descontado nada. Lanza 409 si no alcanza. Se llama al agregar/aumentar un
+    ítem (reserva inmediata), no al cobrar — así la cocina nunca prepara algo que después
+    el sistema se niegue a cobrar por falta de stock."""
+    if not consumo:
+        return
+    for id_insumo, requerido in consumo.items():
+        fila = conn.run("SELECT nombre, cantidad_stock FROM insumos WHERE id = :id FOR UPDATE", id=id_insumo)
+        if not fila:
+            continue
+        nombre, stock_actual = fila[0][0], float(fila[0][1])
+        if stock_actual < requerido:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Stock insuficiente de \"{nombre}\"")
+    for id_insumo, requerido in consumo.items():
+        conn.run(
+            "UPDATE insumos SET cantidad_stock = cantidad_stock - :cant WHERE id = :id",
+            cant=requerido, id=id_insumo,
+        )
+
+
+def _restituir_stock(conn, consumo: dict[int, float]) -> None:
+    """Devuelve al stock lo reservado por un ítem que se quita, se reduce o cuya orden se cancela."""
+    for id_insumo, cantidad in consumo.items():
+        conn.run(
+            "UPDATE insumos SET cantidad_stock = cantidad_stock + :cant WHERE id = :id",
+            cant=cantidad, id=id_insumo,
+        )
 
 
 def _liberar_mesa_si_corresponde(conn, mesa_id: int | None) -> None:
@@ -462,6 +588,43 @@ def ventas_por_mesa(mesa_id: int, current_user: UserOut = Depends(get_current_us
         conn.close()
 
 
+@router.post("/ventas/mesa/{mesa_id}/cambiar", status_code=status.HTTP_204_NO_CONTENT)
+def cambiar_de_mesa(mesa_id: int, payload: MesaCambioIn, current_user: UserOut = Depends(get_current_user)):
+    if payload.destino_id == mesa_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Elige una mesa distinta a la actual")
+    conn = get_connection()
+    try:
+        uid = current_user.tenant_id
+        origen = conn.run("SELECT id FROM mesas WHERE id = :id AND usuario_id = :uid", id=mesa_id, uid=uid)
+        if not origen:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mesa no encontrada")
+        destino = conn.run(
+            "SELECT estado, activo FROM mesas WHERE id = :id AND usuario_id = :uid", id=payload.destino_id, uid=uid
+        )
+        if not destino:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="La mesa destino no existe")
+        if not destino[0][1] or destino[0][0] != "disponible":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="La mesa destino no está libre")
+        activas_destino = conn.run(
+            "SELECT 1 FROM ventas WHERE mesa_id = :mid AND usuario_id = :uid "
+            "AND estado IN ('abierta','en_preparacion','lista')",
+            mid=payload.destino_id, uid=uid,
+        )
+        if activas_destino:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="La mesa destino ya tiene una orden abierta")
+        movidas = conn.run(
+            "UPDATE ventas SET mesa_id = :dest WHERE mesa_id = :orig AND usuario_id = :uid "
+            "AND estado IN ('abierta','en_preparacion','lista') RETURNING id",
+            dest=payload.destino_id, orig=mesa_id, uid=uid,
+        )
+        if not movidas:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="La mesa no tiene una orden para mover")
+        conn.run("UPDATE mesas SET estado = 'ocupada' WHERE id = :id", id=payload.destino_id)
+        _liberar_mesa_si_corresponde(conn, mesa_id)
+    finally:
+        conn.close()
+
+
 @router.post("/ventas", response_model=VentaOut, status_code=status.HTTP_201_CREATED)
 def abrir_orden(payload: VentaCrearIn, current_user: UserOut = Depends(get_current_user)):
     conn = get_connection()
@@ -476,10 +639,12 @@ def abrir_orden(payload: VentaCrearIn, current_user: UserOut = Depends(get_curre
             return _get_venta_con_items(conn, current_user.tenant_id, rows[0][0])
 
         mesa = conn.run(
-            "SELECT id FROM mesas WHERE id = :id AND usuario_id = :uid", id=payload.mesa_id, uid=current_user.tenant_id
+            "SELECT estado, activo FROM mesas WHERE id = :id AND usuario_id = :uid",
+            id=payload.mesa_id, uid=current_user.tenant_id,
         )
         if not mesa:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mesa no encontrada")
+        estado_mesa, activo_mesa = mesa[0]
 
         existente = conn.run(
             "SELECT id FROM ventas WHERE mesa_id = :mid AND usuario_id = :uid "
@@ -487,7 +652,17 @@ def abrir_orden(payload: VentaCrearIn, current_user: UserOut = Depends(get_curre
             mid=payload.mesa_id, uid=current_user.tenant_id,
         )
         if existente:
+            # Ya hay una cuenta abierta en esta mesa: se reutiliza sin importar qué diga
+            # `estado` (se autocorrige abajo), para no bloquear una mesa que ya se auto-saneará.
             return _get_venta_con_items(conn, current_user.tenant_id, existente[0][0])
+
+        if not activo_mesa:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Esta mesa está desactivada")
+        if estado_mesa in ("reservada", "mantenimiento"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"La mesa está {estado_mesa}; cambia su estado antes de abrir una orden",
+            )
 
         rows = conn.run(
             "INSERT INTO ventas (mesa_id, tipo, estado, usuario_id, creado_por_id) "
@@ -530,51 +705,43 @@ def agregar_item(venta_id: int, payload: VentaItemIn, current_user: UserOut = De
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La receta indicada no existe o está inactiva")
         nombre, precio_venta = receta[0][0], float(receta[0][1])
 
-        disponible = conn.run(
-            "SELECT MIN(FLOOR(i.cantidad_stock / ri.cantidad)) FROM receta_insumos ri "
-            "JOIN insumos i ON i.id = ri.id_insumo WHERE ri.id_receta = :id",
-            id=payload.receta_id,
-        )[0][0]
-        if disponible is not None:
-            ya_en_carrito = conn.run(
-                "SELECT COALESCE(SUM(cantidad), 0) FROM venta_items WHERE venta_id = :vid AND receta_id = :rid",
-                vid=venta_id,
-                rid=payload.receta_id,
-            )[0][0]
-            restante = int(disponible) - int(ya_en_carrito)
-            if payload.cantidad > restante:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Stock insuficiente para \"{nombre}\": disponible {max(restante, 0)}",
-                )
+        consumo = _consumo_de_receta(conn, payload.receta_id, payload.cantidad)
 
-        existente = conn.run(
-            "SELECT id, cantidad FROM venta_items WHERE venta_id = :vid AND receta_id = :rid",
-            vid=venta_id,
-            rid=payload.receta_id,
-        )
-        if existente:
-            item_id, cantidad_actual = existente[0]
-            nueva_cantidad = cantidad_actual + payload.cantidad
-            conn.run(
-                "UPDATE venta_items SET cantidad = :cant, subtotal = :subtotal WHERE id = :id",
-                cant=nueva_cantidad,
-                subtotal=round(nueva_cantidad * precio_venta, 2),
-                id=item_id,
-            )
-        else:
-            subtotal = round(payload.cantidad * precio_venta, 2)
-            conn.run(
-                "INSERT INTO venta_items (venta_id, receta_id, nombre, cantidad, precio_unitario, subtotal) "
-                "VALUES (:vid, :rid, :nombre, :cant, :precio, :subtotal)",
+        conn.run("BEGIN")
+        try:
+            _consumir_stock(conn, consumo)
+
+            existente = conn.run(
+                "SELECT id, cantidad FROM venta_items WHERE venta_id = :vid AND receta_id = :rid",
                 vid=venta_id,
                 rid=payload.receta_id,
-                nombre=nombre,
-                cant=payload.cantidad,
-                precio=precio_venta,
-                subtotal=subtotal,
             )
-        _recalcular_total(conn, venta_id)
+            if existente:
+                item_id, cantidad_actual = existente[0]
+                nueva_cantidad = cantidad_actual + payload.cantidad
+                conn.run(
+                    "UPDATE venta_items SET cantidad = :cant, subtotal = :subtotal WHERE id = :id",
+                    cant=nueva_cantidad,
+                    subtotal=round(nueva_cantidad * precio_venta, 2),
+                    id=item_id,
+                )
+            else:
+                subtotal = round(payload.cantidad * precio_venta, 2)
+                conn.run(
+                    "INSERT INTO venta_items (venta_id, receta_id, nombre, cantidad, precio_unitario, subtotal) "
+                    "VALUES (:vid, :rid, :nombre, :cant, :precio, :subtotal)",
+                    vid=venta_id,
+                    rid=payload.receta_id,
+                    nombre=nombre,
+                    cant=payload.cantidad,
+                    precio=precio_venta,
+                    subtotal=subtotal,
+                )
+            _recalcular_total(conn, venta_id)
+            conn.run("COMMIT")
+        except Exception:
+            conn.run("ROLLBACK")
+            raise
         return _get_venta_con_items(conn, current_user.tenant_id, venta_id)
     finally:
         conn.close()
@@ -591,42 +758,35 @@ def actualizar_cantidad_item(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Esta orden ya está cerrada")
 
         item = conn.run(
-            "SELECT receta_id, precio_unitario FROM venta_items WHERE id = :iid AND venta_id = :vid",
+            "SELECT receta_id, precio_unitario, cantidad FROM venta_items WHERE id = :iid AND venta_id = :vid",
             iid=item_id,
             vid=venta_id,
         )
         if not item:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ítem no encontrado")
-        receta_id, precio_unitario = item[0]
+        receta_id, precio_unitario, cantidad_actual = item[0]
+        delta = payload.cantidad - cantidad_actual
 
-        if receta_id is not None:
-            disponible = conn.run(
-                "SELECT MIN(FLOOR(i.cantidad_stock / ri.cantidad)) FROM receta_insumos ri "
-                "JOIN insumos i ON i.id = ri.id_insumo WHERE ri.id_receta = :id",
-                id=receta_id,
-            )[0][0]
-            if disponible is not None:
-                otros_en_carrito = conn.run(
-                    "SELECT COALESCE(SUM(cantidad), 0) FROM venta_items "
-                    "WHERE venta_id = :vid AND receta_id = :rid AND id != :iid",
-                    vid=venta_id,
-                    rid=receta_id,
-                    iid=item_id,
-                )[0][0]
-                restante = int(disponible) - int(otros_en_carrito)
-                if payload.cantidad > restante:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=f"Stock insuficiente: disponible {max(restante, 0)}",
-                    )
+        conn.run("BEGIN")
+        try:
+            if receta_id is not None and delta != 0:
+                consumo_delta = _consumo_de_receta(conn, receta_id, abs(delta))
+                if delta > 0:
+                    _consumir_stock(conn, consumo_delta)
+                else:
+                    _restituir_stock(conn, consumo_delta)
 
-        conn.run(
-            "UPDATE venta_items SET cantidad = :cant, subtotal = :subtotal WHERE id = :id",
-            cant=payload.cantidad,
-            subtotal=round(payload.cantidad * float(precio_unitario), 2),
-            id=item_id,
-        )
-        _recalcular_total(conn, venta_id)
+            conn.run(
+                "UPDATE venta_items SET cantidad = :cant, subtotal = :subtotal WHERE id = :id",
+                cant=payload.cantidad,
+                subtotal=round(payload.cantidad * float(precio_unitario), 2),
+                id=item_id,
+            )
+            _recalcular_total(conn, venta_id)
+            conn.run("COMMIT")
+        except Exception:
+            conn.run("ROLLBACK")
+            raise
         return _get_venta_con_items(conn, current_user.tenant_id, venta_id)
     finally:
         conn.close()
@@ -637,14 +797,24 @@ def eliminar_item(venta_id: int, item_id: int, current_user: UserOut = Depends(g
     conn = get_connection()
     try:
         _get_venta_or_404(conn, current_user.tenant_id, venta_id)
-        deleted = conn.run(
-            "DELETE FROM venta_items WHERE id = :iid AND venta_id = :vid RETURNING id",
-            iid=item_id,
-            vid=venta_id,
+        item = conn.run(
+            "SELECT receta_id, cantidad FROM venta_items WHERE id = :iid AND venta_id = :vid",
+            iid=item_id, vid=venta_id,
         )
-        if not deleted:
+        if not item:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ítem no encontrado")
-        _recalcular_total(conn, venta_id)
+        receta_id, cantidad = item[0]
+
+        conn.run("BEGIN")
+        try:
+            conn.run("DELETE FROM venta_items WHERE id = :iid AND venta_id = :vid", iid=item_id, vid=venta_id)
+            if receta_id is not None:
+                _restituir_stock(conn, _consumo_de_receta(conn, receta_id, cantidad))
+            _recalcular_total(conn, venta_id)
+            conn.run("COMMIT")
+        except Exception:
+            conn.run("ROLLBACK")
+            raise
         return _get_venta_con_items(conn, current_user.tenant_id, venta_id)
     finally:
         conn.close()
@@ -658,6 +828,26 @@ def actualizar_notas(venta_id: int, payload: VentaNotasIn, current_user: UserOut
         if venta["estado"] not in ACTIVOS:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Esta orden ya está cerrada")
         conn.run("UPDATE ventas SET notas = :n WHERE id = :id", n=payload.notas.strip(), id=venta_id)
+        return _get_venta_con_items(conn, current_user.tenant_id, venta_id)
+    finally:
+        conn.close()
+
+
+@router.patch("/ventas/{venta_id}/cliente", response_model=VentaOut)
+def asignar_cliente(venta_id: int, payload: VentaClienteIn, current_user: UserOut = Depends(get_current_user)):
+    """A quién va la factura/comanda: se puede poner o quitar en cualquier estado de la
+    venta, incluso ya cobrada, porque a veces se decide al momento de imprimir."""
+    conn = get_connection()
+    try:
+        _get_venta_or_404(conn, current_user.tenant_id, venta_id)
+        if payload.cliente_id is not None:
+            cliente = conn.run(
+                "SELECT 1 FROM clientes WHERE id = :id AND usuario_id = :uid",
+                id=payload.cliente_id, uid=current_user.tenant_id,
+            )
+            if not cliente:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cliente no encontrado")
+        conn.run("UPDATE ventas SET cliente_id = :cid WHERE id = :id", cid=payload.cliente_id, id=venta_id)
         return _get_venta_con_items(conn, current_user.tenant_id, venta_id)
     finally:
         conn.close()
@@ -722,12 +912,19 @@ def quitar_cupon(venta_id: int, current_user: UserOut = Depends(get_current_user
         conn.close()
 
 
+# Solo avanza, nunca retrocede: "lista" no puede volver a "en_preparacion" vía esta ruta.
+_TRANSICIONES_VENTA_COCINA = {
+    "abierta": {"en_preparacion"},
+    "en_preparacion": {"lista"},
+}
+
+
 @router.patch("/ventas/{venta_id}/estado", response_model=VentaOut)
 def cambiar_estado_cocina(venta_id: int, payload: VentaEstadoIn, current_user: UserOut = Depends(get_current_user)):
     conn = get_connection()
     try:
         venta = _get_venta_or_404(conn, current_user.tenant_id, venta_id)
-        if venta["estado"] not in ACTIVOS or payload.estado not in ACTIVOS:
+        if payload.estado not in _TRANSICIONES_VENTA_COCINA.get(venta["estado"], set()):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transición de estado inválida")
         conn.run("UPDATE ventas SET estado = :e WHERE id = :id", e=payload.estado, id=venta_id)
         return _get_venta_con_items(conn, current_user.tenant_id, venta_id)
@@ -744,35 +941,16 @@ def cobrar_orden(venta_id: int, payload: VentaCobrarIn, current_user: UserOut = 
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Esta orden ya está cerrada")
 
         items = conn.run(
-            "SELECT receta_id, cantidad FROM venta_items WHERE venta_id = :id AND receta_id IS NOT NULL",
+            "SELECT 1 FROM venta_items WHERE venta_id = :id AND receta_id IS NOT NULL LIMIT 1",
             id=venta_id,
         )
         if not items:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La orden no tiene ítems para cobrar")
 
-        consumo: dict[int, float] = {}
-        for receta_id, cantidad in items:
-            ingredientes = conn.run(
-                "SELECT id_insumo, cantidad FROM receta_insumos WHERE id_receta = :id", id=receta_id
-            )
-            for id_insumo, cantidad_receta in ingredientes:
-                consumo[id_insumo] = consumo.get(id_insumo, 0) + float(cantidad_receta) * cantidad
-
-        for id_insumo, requerido in consumo.items():
-            stock = conn.run("SELECT nombre, cantidad_stock FROM insumos WHERE id = :id", id=id_insumo)[0]
-            if float(stock[1]) < requerido:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Stock insuficiente de \"{stock[0]}\" para completar el cobro",
-                )
-
-        for id_insumo, requerido in consumo.items():
-            conn.run(
-                "UPDATE insumos SET cantidad_stock = cantidad_stock - :cant WHERE id = :id",
-                cant=requerido,
-                id=id_insumo,
-            )
-
+        # El stock de cada ítem ya se reservó al agregarlo a la orden (ver agregar_item/
+        # actualizar_cantidad_item), así que cobrar no vuelve a tocarlo — evita que dos mesas
+        # puedan "pasar" la validación de stock al mismo tiempo y solo una logre cobrar después
+        # de que cocina ya preparó ambas.
         conn.run(
             "UPDATE ventas SET estado = 'cerrada', fecha_cierre = now(), metodo_pago = :mp, "
             "pago_efectivo = :pe, pago_tarjeta = :pt, pago_transferencia = :ptr, propina = :prop "
@@ -811,7 +989,22 @@ def cancelar_orden(venta_id: int, current_user: UserOut = Depends(get_current_us
         venta = _get_venta_or_404(conn, current_user.tenant_id, venta_id)
         if venta["estado"] not in ACTIVOS:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Esta orden ya está cerrada")
-        conn.run("UPDATE ventas SET estado = 'cancelada', fecha_cierre = now() WHERE id = :id", id=venta_id)
+
+        items = conn.run(
+            "SELECT receta_id, cantidad FROM venta_items WHERE venta_id = :id AND receta_id IS NOT NULL",
+            id=venta_id,
+        )
+        conn.run("BEGIN")
+        try:
+            # El stock de cada ítem se había reservado al agregarlo (incluso si cocina ya lo
+            # preparó); cancelar la orden lo devuelve, sin importar en qué estado se cancele.
+            for receta_id, cantidad in items:
+                _restituir_stock(conn, _consumo_de_receta(conn, receta_id, cantidad))
+            conn.run("UPDATE ventas SET estado = 'cancelada', fecha_cierre = now() WHERE id = :id", id=venta_id)
+            conn.run("COMMIT")
+        except Exception:
+            conn.run("ROLLBACK")
+            raise
         _liberar_mesa_si_corresponde(conn, venta["mesa_id"])
         return _get_venta_con_items(conn, current_user.tenant_id, venta_id)
     finally:

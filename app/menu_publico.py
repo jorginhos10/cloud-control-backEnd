@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException, status
 
 from app.database import get_connection
-from app.schemas import MenuPublicoDetalleOut, OrdenPublicaOut, PedidoIn, PedidoOut, VentaItemOut
+from app.schemas import MenuPedidoIn, MenuPedidoOut, MenuPublicoDetalleOut, OrdenPublicaOut, VentaItemOut
 from app.menu_digital import _get_items, _row_to_menu
+from app.ventas import _consumir_stock, _consumo_de_receta, _recalcular_total
 
 router = APIRouter(prefix="/menu")
 
@@ -38,10 +39,12 @@ def ver_menu(token: str):
         row = _get_menu_por_token(conn, token)
 
         negocio_rows = conn.run(
-            "SELECT nombre, logo_url, eslogan FROM negocios WHERE usuario_id = :uid",
+            "SELECT nombre, logo_url, eslogan, apariencia FROM negocios WHERE usuario_id = :uid",
             uid=row["usuario_id"],
         )
-        negocio_nombre, negocio_logo_url, negocio_eslogan = negocio_rows[0] if negocio_rows else ("", None, "")
+        negocio_nombre, negocio_logo_url, negocio_eslogan, negocio_apariencia = (
+            negocio_rows[0] if negocio_rows else ("", None, "", "violet-original")
+        )
 
         return MenuPublicoDetalleOut(
             **_row_to_menu(row).model_dump(),
@@ -49,13 +52,14 @@ def ver_menu(token: str):
             negocio_nombre=negocio_nombre,
             negocio_logo_url=negocio_logo_url,
             negocio_eslogan=negocio_eslogan,
+            negocio_apariencia=negocio_apariencia,
         )
     finally:
         conn.close()
 
 
-@router.post("/{token}/pedido", response_model=PedidoOut, status_code=status.HTTP_201_CREATED)
-def hacer_pedido(token: str, payload: PedidoIn):
+@router.post("/{token}/pedido", response_model=MenuPedidoOut, status_code=status.HTTP_201_CREATED)
+def hacer_pedido(token: str, payload: MenuPedidoIn):
     conn = get_connection()
     try:
         menu = _get_menu_por_token(conn, token)
@@ -69,78 +73,77 @@ def hacer_pedido(token: str, payload: PedidoIn):
 
         items_del_menu = {r[0] for r in conn.run("SELECT receta_id FROM menu_items WHERE menu_id = :id", id=menu["id"])}
 
-        existente = conn.run(
-            "SELECT id FROM ventas WHERE mesa_id = :mid AND usuario_id = :uid "
-            "AND estado IN ('abierta','en_preparacion','lista') ORDER BY fecha_apertura LIMIT 1",
-            mid=menu["mesa_id"], uid=menu["usuario_id"],
-        )
-        if existente:
-            venta_id = existente[0][0]
-        else:
-            rows = conn.run(
-                "INSERT INTO ventas (mesa_id, tipo, estado, usuario_id) VALUES (:mesa_id, 'mesa', 'abierta', :uid) "
-                "RETURNING id",
-                mesa_id=menu["mesa_id"], uid=menu["usuario_id"],
-            )
-            venta_id = rows[0][0]
-            conn.run("UPDATE mesas SET estado = 'ocupada' WHERE id = :id", id=menu["mesa_id"])
-
         pedido: dict[int, int] = {}
         for item in payload.items:
             if item.receta_id not in items_del_menu:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uno de los ítems no pertenece a este menú")
             pedido[item.receta_id] = pedido.get(item.receta_id, 0) + item.cantidad
 
-        for receta_id, cantidad in pedido.items():
+        # Se valida que todos los platos sigan activos ANTES de tocar la mesa/venta: si alguno ya
+        # se desactivó, el pedido se rechaza entero en vez de crear una cuenta a medias con un
+        # total que no refleja lo que el cliente realmente pidió.
+        recetas_info: dict[int, tuple[str, float]] = {}
+        for receta_id in pedido:
             receta = conn.run(
                 "SELECT nombre, precio_venta FROM recetas WHERE id = :id AND activo = true", id=receta_id
             )
             if not receta:
-                continue
-            nombre, precio_venta = receta[0][0], float(receta[0][1])
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Uno de los platos de tu pedido ya no está disponible. Actualiza el menú e inténtalo de nuevo.",
+                )
+            recetas_info[receta_id] = (receta[0][0], float(receta[0][1]))
 
-            disponible = conn.run(
-                "SELECT MIN(FLOOR(i.cantidad_stock / ri.cantidad)) FROM receta_insumos ri "
-                "JOIN insumos i ON i.id = ri.id_insumo WHERE ri.id_receta = :id",
-                id=receta_id,
-            )[0][0]
-            if disponible is not None:
-                ya_en_carrito = conn.run(
-                    "SELECT COALESCE(SUM(cantidad), 0) FROM venta_items WHERE venta_id = :vid AND receta_id = :rid",
+        existente = conn.run(
+            "SELECT id FROM ventas WHERE mesa_id = :mid AND usuario_id = :uid "
+            "AND estado IN ('abierta','en_preparacion','lista') ORDER BY fecha_apertura LIMIT 1",
+            mid=menu["mesa_id"], uid=menu["usuario_id"],
+        )
+
+        conn.run("BEGIN")
+        try:
+            if existente:
+                venta_id = existente[0][0]
+            else:
+                rows = conn.run(
+                    "INSERT INTO ventas (mesa_id, tipo, estado, usuario_id) VALUES (:mesa_id, 'mesa', 'abierta', :uid) "
+                    "RETURNING id",
+                    mesa_id=menu["mesa_id"], uid=menu["usuario_id"],
+                )
+                venta_id = rows[0][0]
+                conn.run("UPDATE mesas SET estado = 'ocupada' WHERE id = :id", id=menu["mesa_id"])
+
+            for receta_id, cantidad in pedido.items():
+                nombre, precio_venta = recetas_info[receta_id]
+                _consumir_stock(conn, _consumo_de_receta(conn, receta_id, cantidad))
+
+                existente_item = conn.run(
+                    "SELECT id, cantidad FROM venta_items WHERE venta_id = :vid AND receta_id = :rid",
                     vid=venta_id, rid=receta_id,
-                )[0][0]
-                if cantidad > int(disponible) - int(ya_en_carrito):
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=f"Stock insuficiente para \"{nombre}\"",
+                )
+                if existente_item:
+                    item_id, cant_actual = existente_item[0]
+                    nueva = cant_actual + cantidad
+                    conn.run(
+                        "UPDATE venta_items SET cantidad = :cant, subtotal = :subtotal WHERE id = :id",
+                        cant=nueva, subtotal=round(nueva * precio_venta, 2), id=item_id,
+                    )
+                else:
+                    conn.run(
+                        "INSERT INTO venta_items (venta_id, receta_id, nombre, cantidad, precio_unitario, subtotal) "
+                        "VALUES (:vid, :rid, :nombre, :cant, :precio, :subtotal)",
+                        vid=venta_id, rid=receta_id, nombre=nombre, cant=cantidad, precio=precio_venta,
+                        subtotal=round(cantidad * precio_venta, 2),
                     )
 
-            existente_item = conn.run(
-                "SELECT id, cantidad FROM venta_items WHERE venta_id = :vid AND receta_id = :rid",
-                vid=venta_id, rid=receta_id,
-            )
-            if existente_item:
-                item_id, cant_actual = existente_item[0]
-                nueva = cant_actual + cantidad
-                conn.run(
-                    "UPDATE venta_items SET cantidad = :cant, subtotal = :subtotal WHERE id = :id",
-                    cant=nueva, subtotal=round(nueva * precio_venta, 2), id=item_id,
-                )
-            else:
-                conn.run(
-                    "INSERT INTO venta_items (venta_id, receta_id, nombre, cantidad, precio_unitario, subtotal) "
-                    "VALUES (:vid, :rid, :nombre, :cant, :precio, :subtotal)",
-                    vid=venta_id, rid=receta_id, nombre=nombre, cant=cantidad, precio=precio_venta,
-                    subtotal=round(cantidad * precio_venta, 2),
-                )
+            _recalcular_total(conn, venta_id)
+            conn.run("COMMIT")
+        except Exception:
+            conn.run("ROLLBACK")
+            raise
 
-        conn.run(
-            "UPDATE ventas SET total = (SELECT COALESCE(SUM(subtotal), 0) FROM venta_items WHERE venta_id = :id) "
-            "WHERE id = :id",
-            id=venta_id,
-        )
         venta = conn.run("SELECT estado, total FROM ventas WHERE id = :id", id=venta_id)[0]
-        return PedidoOut(venta_id=venta_id, estado=venta[0], total=float(venta[1]))
+        return MenuPedidoOut(venta_id=venta_id, estado=venta[0], total=float(venta[1]))
     finally:
         conn.close()
 
@@ -150,8 +153,11 @@ def estado_pedido(token: str, venta_id: int):
     conn = get_connection()
     try:
         menu = _get_menu_por_token(conn, token)
+        # La ventana de tiempo evita que alguien con el QR de la mesa recorra ids de venta
+        # consecutivos y vea pedidos viejos de otros comensales en la misma mesa.
         rows = conn.run(
-            "SELECT id, estado, total FROM ventas WHERE id = :id AND mesa_id = :mesa_id AND usuario_id = :uid",
+            "SELECT id, estado, total FROM ventas WHERE id = :id AND mesa_id = :mesa_id AND usuario_id = :uid "
+            "AND fecha_apertura > now() - interval '6 hours'",
             id=venta_id, mesa_id=menu["mesa_id"], uid=menu["usuario_id"],
         )
         if not rows:

@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from app import wompi
 from app.auth import UserOut, get_current_user
 from app.database import get_connection, get_superadmin_connection
+from app.modulos import modulos_de_cuenta
 from app.schemas import (
     ConfirmarTransaccionIn,
     PlanPublicoOut,
@@ -28,18 +29,36 @@ def _plan_actual_id(current_user: UserOut) -> int | None:
         conn.close()
 
 
+def tipo_de_comercio(tenant_id: int) -> str:
+    """'store' or 'restobar', from the type the merchant chose on sign-up (accounts with an older type count as restobar)."""
+    conn = get_connection()
+    try:
+        rows = conn.run("SELECT tipo FROM negocios WHERE usuario_id = :id", id=tenant_id)
+        return "store" if rows and rows[0][0] == "Store" else "restobar"
+    finally:
+        conn.close()
+
+
+# A plan is offered to a merchant when it is active and, either it is of the merchant's type of commerce and public,
+# or the SuperAdmin explicitly assigned it to them (whatever its type).
+_PLAN_OFRECIDO = """
+    p.activo = true
+    AND (
+        (p.visibilidad = 'publico' AND p.tipo_comercio = :tipo)
+        OR EXISTS (SELECT 1 FROM plan_comercios pc WHERE pc.plan_id = p.id AND pc.comercio_id = :tid)
+    )
+"""
+
+
 def _fetch_plan_disponible(sconn, plan_id: int, tenant_id: int):
-    """A plan this tenant is actually allowed to pick: active, and either
-    public or explicitly assigned to them."""
+    """A plan this tenant is actually allowed to pick (see _PLAN_OFRECIDO)."""
     rows = sconn.run(
-        """
+        f"""
         SELECT p.id, p.nombre, p.slug, p.descripcion, p.precio, p.periodo, p.color, p.caracteristicas, p.destacado
         FROM planes p
-        WHERE p.id = :id AND p.activo = true
-          AND (p.visibilidad = 'publico'
-               OR EXISTS (SELECT 1 FROM plan_comercios pc WHERE pc.plan_id = p.id AND pc.comercio_id = :tid))
+        WHERE p.id = :id AND {_PLAN_OFRECIDO}
         """,
-        id=plan_id, tid=tenant_id,
+        id=plan_id, tid=tenant_id, tipo=tipo_de_comercio(tenant_id),
     )
     return rows[0] if rows else None
 
@@ -71,12 +90,11 @@ def _aplicar_plan(tenant_id: int, plan_id: int) -> None:
         conn.close()
 
 
-@router.get("/planes", response_model=list[PlanPublicoOut])
-def planes(current_user: UserOut = Depends(get_current_user)):
-    """Plans curated by the SuperAdmin, read-only from here — public active
-    plans, plus any private plan explicitly assigned to this restaurant."""
-    plan_actual = _plan_actual_id(current_user)
-
+def listar_planes_disponibles(tenant_id: int, plan_marcado: int | None) -> list[PlanPublicoOut]:
+    """Plans curated by the SuperAdmin, read-only from here — the public active
+    plans of this merchant's type of commerce (Store or Restobar), plus any plan
+    explicitly assigned to this merchant.
+    `plan_marcado` is the one flagged as `actual` in the result."""
     try:
         sconn = get_superadmin_connection()
     except Exception:
@@ -84,19 +102,28 @@ def planes(current_user: UserOut = Depends(get_current_user)):
 
     try:
         rows = sconn.run(
-            """
+            f"""
             SELECT p.id, p.nombre, p.slug, p.descripcion, p.precio, p.periodo, p.color, p.caracteristicas, p.destacado
             FROM planes p
-            WHERE p.activo = true
-              AND (p.visibilidad = 'publico'
-                   OR EXISTS (SELECT 1 FROM plan_comercios pc WHERE pc.plan_id = p.id AND pc.comercio_id = :tid))
+            WHERE {_PLAN_OFRECIDO}
             ORDER BY p.orden ASC, p.id ASC
             """,
-            tid=current_user.tenant_id,
+            tid=tenant_id, tipo=tipo_de_comercio(tenant_id),
         )
-        return [_plan_publico_out(r, actual=(r[0] == plan_actual)) for r in rows]
+        return [_plan_publico_out(r, actual=(r[0] == plan_marcado)) for r in rows]
     finally:
         sconn.close()
+
+
+@router.get("/modulos")
+def modulos_del_plan(current_user: UserOut = Depends(get_current_user)):
+    """Modules the account's plan includes (the client hides and blocks everything else)."""
+    return {"modulos": sorted(modulos_de_cuenta(current_user.tenant_id))}
+
+
+@router.get("/planes", response_model=list[PlanPublicoOut])
+def planes(current_user: UserOut = Depends(get_current_user)):
+    return listar_planes_disponibles(current_user.tenant_id, _plan_actual_id(current_user))
 
 
 @router.post("/seleccionar", response_model=SuscripcionPagoOut)

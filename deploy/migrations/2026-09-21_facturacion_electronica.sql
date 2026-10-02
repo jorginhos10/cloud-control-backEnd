@@ -1,0 +1,42 @@
+CREATE TABLE IF NOT EXISTS facturacion_electronica (
+    usuario_id            bigint PRIMARY KEY REFERENCES usuarios(id),
+    activa                boolean      NOT NULL DEFAULT false,
+    ambiente              varchar(12)  NOT NULL DEFAULT 'habilitacion',
+    tipo_documento        varchar(30)  NOT NULL DEFAULT 'factura_electronica',
+
+    tipo_persona          varchar(10)  NOT NULL DEFAULT 'juridica',
+    nit                   varchar(10)  NOT NULL DEFAULT '',
+    dv                    varchar(1)   NOT NULL DEFAULT '',
+    razon_social          varchar(200) NOT NULL DEFAULT '',
+    nombre_comercial      varchar(200) NOT NULL DEFAULT '',
+    regimen_iva           varchar(20)  NOT NULL DEFAULT 'responsable_iva',
+    responsabilidades_fiscales varchar(100) NOT NULL DEFAULT '',
+    actividad_economica   varchar(4)   NOT NULL DEFAULT '',
+    matricula_mercantil   varchar(30)  NOT NULL DEFAULT '',
+    direccion             varchar(200) NOT NULL DEFAULT '',
+    departamento          varchar(100) NOT NULL DEFAULT '',
+    ciudad                varchar(100) NOT NULL DEFAULT '',
+    codigo_municipio      varchar(5)   NOT NULL DEFAULT '',
+    codigo_postal         varchar(6)   NOT NULL DEFAULT '',
+    telefono              varchar(30)  NOT NULL DEFAULT '',
+    email_facturacion     varchar(150) NOT NULL DEFAULT '',
+
+    resolucion_numero     varchar(30)  NOT NULL DEFAULT '',
+    resolucion_fecha      date,
+    prefijo               varchar(10)  NOT NULL DEFAULT '',
+    rango_desde           bigint,
+    rango_hasta           bigint,
+    vigencia_desde        date,
+    vigencia_hasta        date,
+    clave_tecnica         varchar(100) NOT NULL DEFAULT '',
+
+    proveedor_tecnologico varchar(100) NOT NULL DEFAULT '',
+    usuario_api           varchar(150) NOT NULL DEFAULT '',
+    token_api             varchar(500) NOT NULL DEFAULT '',
+    software_id           varchar(60)  NOT NULL DEFAULT '',
+    software_pin          varchar(60)  NOT NULL DEFAULT '',
+    test_set_id           varchar(60)  NOT NULL DEFAULT '',
+
+    enviar_email_cliente  boolean      NOT NULL DEFAULT true,
+    updated_at            timestamptz  NOT NULL DEFAULT now()
+);

@@ -37,11 +37,12 @@ MENU_ITEMS_SELECT = """
                FROM receta_insumos ri
                JOIN insumos i ON i.id = ri.id_insumo
                WHERE ri.id_receta = r.id
-           ) AS disponible
+           ) AS disponible,
+           r.imagen_url
     FROM menu_items mi
     JOIN recetas r ON r.id = mi.receta_id
     JOIN receta_categorias rc ON rc.id = r.categoria_id
-    WHERE mi.menu_id = :id
+    WHERE mi.menu_id = :id AND r.activo = true
     ORDER BY mi.orden
 """
 
@@ -60,6 +61,7 @@ def _get_items(conn, menu_id: int) -> list[MenuItemOut]:
         MenuItemOut(
             receta_id=r[0], nombre=r[1], descripcion=r[2], categoria=r[3],
             precio_venta=float(r[4]), orden=r[5], disponible=int(r[6]) if r[6] is not None else None,
+            imagen_url=r[7],
         )
         for r in rows
     ]

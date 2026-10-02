@@ -1,7 +1,10 @@
 from datetime import date, datetime
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, EmailStr, Field
+
+
+EstadoAprobacion = Literal["pendiente_datos", "pendiente_aprobacion", "aprobado", "rechazado"]
 
 
 class RegisterIn(BaseModel):
@@ -33,6 +36,8 @@ class UserOut(BaseModel):
     propietario_id: Optional[int] = Field(default=None, serialization_alias="propietarioId")
     tenant_id: int = Field(serialization_alias="tenantId")
     fecha_creacion: datetime = Field(serialization_alias="fechaCreacion")
+    estado_aprobacion: EstadoAprobacion = Field(default="aprobado", serialization_alias="estadoAprobacion")
+    motivo_rechazo: str = Field(default="", serialization_alias="motivoRechazo")
 
     model_config = {"populate_by_name": True}
 
@@ -148,6 +153,10 @@ class VentaCrearIn(BaseModel):
     mesa_id: Optional[int] = None
 
 
+class MesaCambioIn(BaseModel):
+    destino_id: int
+
+
 class VentaItemIn(BaseModel):
     receta_id: int
     cantidad: int = Field(ge=1, default=1)
@@ -182,11 +191,17 @@ class VentaOut(BaseModel):
     propina: float = 0
     fecha_apertura: datetime
     fecha_cierre: Optional[datetime] = None
+    cliente_id: Optional[int] = None
+    cliente_nombre: Optional[str] = None
     items: list[VentaItemOut] = []
 
 
 class VentaEstadoIn(BaseModel):
     estado: EstadoVenta
+
+
+class VentaClienteIn(BaseModel):
+    cliente_id: Optional[int] = None
 
 
 class VentaNotasIn(BaseModel):
@@ -240,12 +255,14 @@ class CatalogoItemOut(BaseModel):
     categoria: str
     precio_venta: float
     disponible: Optional[int] = None
+    imagen_url: Optional[str] = None
 
 
 class NegocioPublicoOut(BaseModel):
     nombre: str = ""
     logo_url: Optional[str] = None
     eslogan: str = ""
+    apariencia: str = "violet-original"
 
 
 class CocinaItemOut(BaseModel):
@@ -257,7 +274,7 @@ class CocinaItemOut(BaseModel):
 
 class CocinaOrdenOut(BaseModel):
     id: int
-    tipo: TipoVenta
+    tipo: str
     estado: EstadoVenta
     notas: str
     fecha_apertura: datetime
@@ -265,6 +282,9 @@ class CocinaOrdenOut(BaseModel):
     mesa_nombre: Optional[str] = None
     mesa_zona: Optional[str] = None
     items: list[CocinaItemOut] = []
+    origen: Literal["venta", "domicilio"] = "venta"
+    cliente_nombre: Optional[str] = None
+    direccion: Optional[str] = None
 
 
 class SalonMesaOut(BaseModel):
@@ -447,6 +467,7 @@ class RecetaIn(BaseModel):
     porciones: int = Field(ge=1, default=1)
     precio_venta: float = Field(ge=0, default=0)
     activo: bool = True
+    imagen_url: Optional[str] = None
     ingredientes: list[RecetaIngredienteIn] = []
 
 
@@ -472,6 +493,7 @@ class RecetaOut(BaseModel):
     precio_venta: float
     activo: bool
     created_at: datetime
+    imagen_url: Optional[str] = None
     ingredientes: list[RecetaIngredienteOut] = []
     costo_total: float
     margen: float
@@ -565,6 +587,7 @@ class MenuItemOut(BaseModel):
     precio_venta: float
     disponible: Optional[int] = None
     orden: int
+    imagen_url: Optional[str] = None
 
 
 class MenuDigitalDetalleOut(MenuDigitalOut):
@@ -575,18 +598,19 @@ class MenuPublicoDetalleOut(MenuDigitalDetalleOut):
     negocio_nombre: str = ""
     negocio_logo_url: Optional[str] = None
     negocio_eslogan: str = ""
+    negocio_apariencia: str = "violet-original"
 
 
-class PedidoItemIn(BaseModel):
+class MenuPedidoItemIn(BaseModel):
     receta_id: int
     cantidad: int = Field(ge=1, default=1)
 
 
-class PedidoIn(BaseModel):
-    items: list[PedidoItemIn] = []
+class MenuPedidoIn(BaseModel):
+    items: list[MenuPedidoItemIn] = []
 
 
-class PedidoOut(BaseModel):
+class MenuPedidoOut(BaseModel):
     venta_id: int
     estado: EstadoVenta
     total: float
@@ -647,6 +671,7 @@ class PqrsValidoOut(BaseModel):
 
 
 TipoDomicilio = Literal["domicilio", "recoger"]
+MetodoPagoDomicilio = Literal["efectivo", "tarjeta", "transferencia"]
 EstadoDomicilio = Literal["pendiente", "preparacion", "listo", "en_camino", "entregado", "cancelado"]
 
 
@@ -662,16 +687,72 @@ class DomicilioPedidoIn(BaseModel):
     barrio: str = Field(default="", max_length=100)
     notas: str = Field(default="", max_length=500)
     tipo: TipoDomicilio = "domicilio"
+    metodo_pago: MetodoPagoDomicilio = "efectivo"
     items: list[DomicilioItemIn] = []
+    # Ubicación del cliente (GPS del celular) para calcular el domicilio automático.
+    lat: Optional[float] = Field(default=None, ge=-90, le=90)
+    lng: Optional[float] = Field(default=None, ge=-180, le=180)
 
 
 class DomicilioInternoIn(DomicilioPedidoIn):
     valor_domicilio: Optional[float] = Field(default=None, ge=0)
 
 
+ModoDomicilio = Literal["gratis", "personalizado", "automatico"]
+
+
+class DomicilioConfigIn(BaseModel):
+    modo: ModoDomicilio = "personalizado"
+    valor_fijo: Optional[float] = Field(default=None, ge=0)
+    tarifa_base: float = Field(default=0, ge=0)
+    km_base: float = Field(default=2, ge=0)
+    valor_km: float = Field(default=0, ge=0)
+    radio_max_km: Optional[float] = Field(default=None, gt=0)
+    lat: Optional[float] = Field(default=None, ge=-90, le=90)
+    lng: Optional[float] = Field(default=None, ge=-180, le=180)
+
+
+class DomicilioUbicacionOut(BaseModel):
+    lat: float
+    lng: float
+
+
+class DomicilioCotizacionIn(BaseModel):
+    direccion: str = Field(default="", max_length=500)
+    barrio: str = Field(default="", max_length=100)
+    lat: Optional[float] = Field(default=None, ge=-90, le=90)
+    lng: Optional[float] = Field(default=None, ge=-180, le=180)
+
+
+class LugarSugerenciaOut(BaseModel):
+    id: str
+    principal: str
+    secundario: str = ""
+    distancia_km: Optional[float] = None
+    # Quién aportó la sugerencia: define la atribución que debe mostrarse.
+    fuente: str = "google"
+
+
+class LugarDetalleOut(BaseModel):
+    direccion: str = ""
+    barrio: str = ""
+    lat: float
+    lng: float
+
+
+class DomicilioCotizacionOut(BaseModel):
+    modo: ModoDomicilio
+    valor: Optional[float] = None
+    distancia_km: Optional[float] = None
+    fuera_de_cobertura: bool = False
+    mensaje: str = ""
+
+
 class DomicilioEstadoIn(BaseModel):
     estado: EstadoDomicilio
     valor_domicilio: Optional[float] = Field(default=None, ge=0)
+    # Obligatorio cuando el negocio cancela un pedido que ya había aceptado (preparación o listo).
+    motivo: Optional[str] = Field(default=None, max_length=500)
 
 
 class DomicilioItemOut(BaseModel):
@@ -691,11 +772,13 @@ class DomicilioOut(BaseModel):
     barrio: str
     notas: str
     tipo: TipoDomicilio
+    metodo_pago: str = ""
     estado: EstadoDomicilio
     total: float
     valor_domicilio: Optional[float] = None
     created_at: datetime
     updated_at: datetime
+    motivo_cancelacion: str = ""
     items: list[DomicilioItemOut] = []
 
 
@@ -839,6 +922,9 @@ class MarketplaceItemOut(BaseModel):
     categoria: str
     unidad_medida: str
     precio_unitario: float
+    precio_envio: float = 0
+    imagenes: list[str] = []
+    descripcion: Optional[str] = None
 
 
 class TiendaOut(BaseModel):
@@ -890,16 +976,19 @@ class PedidoItemOut(BaseModel):
 
 class PedidoOut(BaseModel):
     id: int
+    radicado: str = ""
     tienda_id: int
     tienda_nombre: str
     subtotal: float
     descuento: float
+    envio: float = 0
     total: float
     cupon_codigo: Optional[str] = None
     estado: str
     wompi_reference: str
     wompi_transaction_id: Optional[str] = None
     created_at: datetime
+    updated_at: Optional[datetime] = None
     items: list[PedidoItemOut] = []
 
 
@@ -981,7 +1070,7 @@ class ProveedorEstadisticasOut(BaseModel):
     categoria_c: int
 
 
-MotivoPerdida = Literal["vencido", "danado", "robo", "error_cocina", "otro"]
+MotivoPerdida = Literal["vencido", "danado", "extraviado", "error_cocina", "otro"]
 EstadoPerdida = Literal["aceptado", "anulado"]
 
 
@@ -1126,3 +1215,262 @@ class NegocioIn(BaseModel):
 
 class NegocioOut(NegocioIn):
     updated_at: datetime
+
+
+class NegocioAparienciaIn(BaseModel):
+    apariencia: str = Field(min_length=1, max_length=30)
+
+
+class NegocioAparienciaOut(BaseModel):
+    apariencia: str
+
+
+AmbienteDian = Literal["habilitacion", "produccion"]
+TipoDocumentoElectronico = Literal["factura_electronica", "documento_equivalente_pos"]
+TipoPersona = Literal["juridica", "natural"]
+RegimenIva = Literal["responsable_iva", "no_responsable_iva"]
+ResponsabilidadFiscal = Literal["O-13", "O-15", "O-23", "O-47", "R-99-PN"]
+
+
+class FacturacionElectronicaBase(BaseModel):
+    activa: bool = False
+    ambiente: AmbienteDian = "habilitacion"
+    tipo_documento: TipoDocumentoElectronico = "factura_electronica"
+
+    tipo_persona: TipoPersona = "juridica"
+    nit: str = Field(default="", pattern=r"^(\d{6,10})?$")
+    razon_social: str = Field(default="", max_length=200)
+    nombre_comercial: str = Field(default="", max_length=200)
+    regimen_iva: RegimenIva = "responsable_iva"
+    responsabilidades_fiscales: list[ResponsabilidadFiscal] = Field(default_factory=list, max_length=5)
+    actividad_economica: str = Field(default="", pattern=r"^(\d{4})?$")
+    matricula_mercantil: str = Field(default="", max_length=30)
+    direccion: str = Field(default="", max_length=200)
+    departamento: str = Field(default="", max_length=100)
+    ciudad: str = Field(default="", max_length=100)
+    codigo_municipio: str = Field(default="", pattern=r"^(\d{5})?$")
+    codigo_postal: str = Field(default="", pattern=r"^(\d{6})?$")
+    telefono: str = Field(default="", max_length=30)
+    email_facturacion: Union[EmailStr, Literal[""]] = ""
+
+    resolucion_numero: str = Field(default="", max_length=30)
+    resolucion_fecha: Optional[date] = None
+    prefijo: str = Field(default="", pattern=r"^[A-Za-z0-9]{0,10}$")
+    rango_desde: Optional[int] = Field(default=None, ge=1)
+    rango_hasta: Optional[int] = Field(default=None, ge=1)
+    vigencia_desde: Optional[date] = None
+    vigencia_hasta: Optional[date] = None
+
+    proveedor_tecnologico: str = Field(default="", max_length=100)
+    usuario_api: str = Field(default="", max_length=150)
+    software_id: str = Field(default="", max_length=60)
+    test_set_id: str = Field(default="", max_length=60)
+    enviar_email_cliente: bool = True
+
+
+class FacturacionElectronicaIn(FacturacionElectronicaBase):
+    # Write-only: empty/absent keeps the stored value, non-empty replaces it.
+    clave_tecnica: str = Field(default="", max_length=100)
+    token_api: str = Field(default="", max_length=500)
+    software_pin: str = Field(default="", max_length=60)
+
+
+class FacturacionElectronicaOut(FacturacionElectronicaBase):
+    dv: str = ""
+    clave_tecnica_configurada: bool = False
+    token_api_configurado: bool = False
+    software_pin_configurado: bool = False
+    updated_at: Optional[datetime] = None
+
+
+TipoDocumentoComercio = Literal["identificacion_fiscal", "documento_representante", "camara_comercio", "otro"]
+
+
+class OnboardingDatosIn(BaseModel):
+    model_config = {"str_strip_whitespace": True}
+
+    numero_documento: str = Field(min_length=5, max_length=20, pattern=r"^[0-9A-Za-z.\-]+$")
+    telefono: str = Field(min_length=7, max_length=30)
+    nombre_negocio: str = Field(min_length=2, max_length=150)
+    tipo_negocio: Literal["Store", "Restobar"]
+    rut: str = Field(min_length=5, max_length=50)
+    direccion: str = Field(min_length=3, max_length=200)
+    ciudad: str = Field(min_length=2, max_length=100)
+    sitio_web: str = Field(default="", max_length=200)
+
+
+class OnboardingLogoIn(BaseModel):
+    logo_url: Optional[str] = Field(default=None, max_length=3_000_000)
+
+
+class OnboardingPlanIn(BaseModel):
+    plan_id: int
+
+
+class OnboardingDocumentoIn(BaseModel):
+    tipo: TipoDocumentoComercio
+    nombre_archivo: str = Field(min_length=1, max_length=200)
+    contenido_base64: str = Field(min_length=1, max_length=7_500_000)
+
+
+class OnboardingDocumentoOut(BaseModel):
+    id: int
+    tipo: TipoDocumentoComercio
+    nombre_archivo: str
+    content_type: str
+    tamano: int
+    created_at: datetime
+    estado: Literal["pendiente", "rechazado"] = "pendiente"
+    motivo_rechazo: str = ""
+
+
+class OnboardingOut(BaseModel):
+    numero_documento: str = ""
+    telefono: str = ""
+    nombre_negocio: str = ""
+    tipo_negocio: str = "Restaurante"
+    rut: str = ""
+    direccion: str = ""
+    ciudad: str = ""
+    sitio_web: str = ""
+    logo_url: Optional[str] = None
+    plan_solicitado_id: Optional[int] = None
+    documentos: list[OnboardingDocumentoOut] = []
+    estado_aprobacion: EstadoAprobacion = "pendiente_datos"
+    motivo_rechazo: str = ""
+    tipos_comercio_habilitados: list[str] = ["Store", "Restobar"]
+
+
+TipoContrato = Literal["indefinido", "fijo", "obra_labor", "prestacion_servicios"]
+TipoPagoNomina = Literal["mensual", "quincenal", "por_horas", "por_dia"]
+TipoCuentaBancaria = Literal["ahorros", "corriente"]
+TipoPeriodoNomina = Literal["quincenal", "mensual", "diario"]
+EstadoPeriodoNomina = Literal["borrador", "calculada", "pagada"]
+DiaSemana = Literal["lun", "mar", "mie", "jue", "vie", "sab", "dom"]
+
+
+class HorarioDia(BaseModel):
+    activo: bool = False
+    horas: float = Field(ge=0, le=24, default=0)
+
+
+class NominaEmpleadoIn(BaseModel):
+    tipo_contrato: TipoContrato = "indefinido"
+    tipo_pago: TipoPagoNomina = "mensual"
+    salario_base: float = Field(ge=0, default=0)
+    valor_hora: float = Field(ge=0, default=0)
+    valor_dia: float = Field(ge=0, default=0)
+    eps: str = Field(default="", max_length=100)
+    afp: str = Field(default="", max_length=100)
+    arl: str = Field(default="", max_length=100)
+    fecha_ingreso: Optional[date] = None
+    banco: str = Field(default="", max_length=100)
+    tipo_cuenta: Optional[TipoCuentaBancaria] = None
+    numero_cuenta: str = Field(default="", max_length=50)
+    horario: dict[DiaSemana, HorarioDia] = Field(default_factory=dict)
+
+
+class NominaEmpleadoOut(BaseModel):
+    staff_id: int
+    nombre: str
+    apellido: str
+    rol: str
+    activo: bool
+    numero_documento: str
+    tiene_perfil: bool
+    tipo_contrato: TipoContrato
+    tipo_pago: TipoPagoNomina
+    salario_base: float
+    valor_hora: float
+    valor_dia: float
+    eps: str
+    afp: str
+    arl: str
+    fecha_ingreso: Optional[date] = None
+    banco: str
+    tipo_cuenta: Optional[TipoCuentaBancaria] = None
+    numero_cuenta: str
+    horario: dict[DiaSemana, HorarioDia] = Field(default_factory=dict)
+
+
+class CorteDiaOut(BaseModel):
+    staff_id: int
+    nombre: str
+    rol: str
+    tipo_pago: TipoPagoNomina
+    horas_programadas: float
+    monto_sugerido: float
+    pago_id: Optional[int] = None
+    monto_pagado: Optional[float] = None
+    notas: str = ""
+
+
+class CortePagoIn(BaseModel):
+    staff_id: int
+    fecha: date
+    monto: float = Field(ge=0)
+    notas: str = Field(default="", max_length=300)
+
+
+class CortePagoOut(BaseModel):
+    id: int
+    staff_id: int
+    nombre: str
+    fecha: date
+    monto: float
+    notas: str
+    created_at: datetime
+
+
+class NominaPeriodoIn(BaseModel):
+    fecha_inicio: date
+    fecha_fin: date
+    tipo: TipoPeriodoNomina = "quincenal"
+
+
+class NominaPeriodoOut(BaseModel):
+    id: int
+    fecha_inicio: date
+    fecha_fin: date
+    tipo: TipoPeriodoNomina
+    estado: EstadoPeriodoNomina
+    total_empleados: int
+    total_neto: float
+    created_at: datetime
+    cerrado_en: Optional[datetime] = None
+
+
+class NominaCalcularIn(BaseModel):
+    porcentaje_salud: float = Field(ge=0, le=100, default=4)
+    porcentaje_pension: float = Field(ge=0, le=100, default=4)
+
+
+class NominaDetalleOut(BaseModel):
+    id: int
+    periodo_id: int
+    staff_id: int
+    nombre: str
+    rol: str
+    salario_base: float
+    dias_trabajados: float
+    horas_extra: float
+    bonificaciones: float
+    propinas: float
+    otros_descuentos: float
+    salud: float
+    pension: float
+    total_devengado: float
+    total_deducciones: float
+    neto_pagar: float
+    notas: str
+
+
+class NominaDetalleUpdateIn(BaseModel):
+    dias_trabajados: float = Field(ge=0, default=30)
+    horas_extra: float = Field(ge=0, default=0)
+    bonificaciones: float = Field(ge=0, default=0)
+    propinas: float = Field(ge=0, default=0)
+    otros_descuentos: float = Field(ge=0, default=0)
+    salud: float = Field(ge=0, default=0)
+    pension: float = Field(ge=0, default=0)
+    notas: str = Field(default="", max_length=300)

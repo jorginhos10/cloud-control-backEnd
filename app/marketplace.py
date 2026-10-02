@@ -1,6 +1,6 @@
 import os
 import uuid
-from datetime import date
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -29,8 +29,8 @@ from app.schemas import (
 router = APIRouter(prefix="/marketplace", dependencies=[Depends(get_current_user)])
 
 PEDIDO_COLUMNS = [
-    "id", "tienda_id", "tienda_nombre", "subtotal", "descuento", "total",
-    "cupon_codigo", "estado", "wompi_reference", "wompi_transaction_id", "created_at",
+    "id", "tienda_id", "tienda_nombre", "subtotal", "descuento", "envio", "total",
+    "cupon_codigo", "estado", "wompi_reference", "wompi_transaction_id", "created_at", "updated_at",
 ]
 PEDIDO_ITEM_COLUMNS = ["id", "producto_id", "nombre", "categoria", "precio_unitario", "cantidad", "subtotal"]
 
@@ -121,13 +121,14 @@ def productos_tienda_global(tienda_id: int, current_user: UserOut = Depends(get_
 
     try:
         rows = sconn.run(
-            "SELECT id, nombre, categoria, unidad, precio "
+            "SELECT id, nombre, categoria, unidad, precio, precio_envio, imagenes, descripcion "
             "FROM marketplace_productos WHERE tienda_id = :tid AND activo = true ORDER BY nombre",
             tid=tienda_id,
         )
         return [
             MarketplaceItemOut(
                 id=r[0], nombre=r[1], categoria=r[2], unidad_medida=r[3], precio_unitario=float(r[4]),
+                precio_envio=float(r[5]), imagenes=r[6] or [], descripcion=r[7],
             )
             for r in rows
         ]
@@ -186,12 +187,18 @@ def _get_pedido_items(conn, pedido_id: int) -> list[PedidoItemOut]:
     ]
 
 
+def radicado_de(pedido_id: int, creado: datetime) -> str:
+    """Filing number of an order; the SuperAdmin computes the very same one for its Órdenes."""
+    return f"MK-{creado.year}-{pedido_id:06d}"
+
+
 def _row_to_pedido(conn, row: dict) -> PedidoOut:
     return PedidoOut(
-        id=row["id"], tienda_id=row["tienda_id"], tienda_nombre=row["tienda_nombre"],
-        subtotal=float(row["subtotal"]), descuento=float(row["descuento"]), total=float(row["total"]),
+        id=row["id"], radicado=radicado_de(row["id"], row["created_at"]), tienda_id=row["tienda_id"], tienda_nombre=row["tienda_nombre"],
+        subtotal=float(row["subtotal"]), descuento=float(row["descuento"]), envio=float(row["envio"]),
+        total=float(row["total"]),
         cupon_codigo=row["cupon_codigo"], estado=row["estado"], wompi_reference=row["wompi_reference"],
-        wompi_transaction_id=row["wompi_transaction_id"], created_at=row["created_at"],
+        wompi_transaction_id=row["wompi_transaction_id"], created_at=row["created_at"], updated_at=row["updated_at"],
         items=_get_pedido_items(conn, row["id"]),
     )
 
@@ -249,19 +256,21 @@ def crear_pedido(payload: PedidoIn, current_user: UserOut = Depends(get_current_
         items_validos = []
         for item in payload.items:
             prod = sconn.run(
-                "SELECT nombre, categoria, precio FROM marketplace_productos "
+                "SELECT nombre, categoria, precio, precio_envio FROM marketplace_productos "
                 "WHERE id = :id AND tienda_id = :tid AND activo = true",
                 id=item.producto_id, tid=payload.tienda_id,
             )
             if not prod:
                 continue
-            nombre, categoria, precio = prod[0][0], prod[0][1], float(prod[0][2])
-            items_validos.append((item.producto_id, nombre, categoria, item.cantidad, precio))
+            nombre, categoria, precio, precio_envio = prod[0][0], prod[0][1], float(prod[0][2]), float(prod[0][3])
+            items_validos.append((item.producto_id, nombre, categoria, item.cantidad, precio, precio_envio))
 
         if not items_validos:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ninguno de los productos es válido")
 
-        subtotal = round(sum(cant * precio for _, _, _, cant, precio in items_validos), 2)
+        subtotal = round(sum(cant * precio for _, _, _, cant, precio, _ in items_validos), 2)
+        # Shipping is charged once per product line, whatever the quantity.
+        envio = round(sum(precio_envio for *_, precio_envio in items_validos), 2)
 
         descuento = 0.0
         cupon_codigo = None
@@ -272,7 +281,7 @@ def crear_pedido(payload: PedidoIn, current_user: UserOut = Depends(get_current_
             descuento = resultado.descuento
             cupon_codigo = payload.cupon_codigo.strip().upper()
 
-        total = round(subtotal - descuento, 2)
+        total = round(subtotal - descuento + envio, 2)
         if total <= 0:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El total del pedido debe ser mayor a cero")
 
@@ -289,16 +298,16 @@ def crear_pedido(payload: PedidoIn, current_user: UserOut = Depends(get_current_
         rows = conn.run(
             """
             INSERT INTO marketplace_pedidos
-                (usuario_id, tienda_id, tienda_nombre, subtotal, descuento, total, cupon_codigo, wompi_reference)
-            VALUES (:uid, :tid, :tnombre, :subtotal, :descuento, :total, :cupon, :ref)
+                (usuario_id, tienda_id, tienda_nombre, subtotal, descuento, envio, total, cupon_codigo, wompi_reference)
+            VALUES (:uid, :tid, :tnombre, :subtotal, :descuento, :envio, :total, :cupon, :ref)
             RETURNING id
             """,
             uid=current_user.tenant_id, tid=payload.tienda_id, tnombre=tienda_nombre,
-            subtotal=subtotal, descuento=descuento, total=total, cupon=cupon_codigo, ref=reference,
+            subtotal=subtotal, descuento=descuento, envio=envio, total=total, cupon=cupon_codigo, ref=reference,
         )
         pedido_id = rows[0][0]
 
-        for producto_id, nombre, categoria, cantidad, precio in items_validos:
+        for producto_id, nombre, categoria, cantidad, precio, _ in items_validos:
             conn.run(
                 "INSERT INTO marketplace_pedido_items "
                 "(pedido_id, producto_id, nombre, categoria, precio_unitario, cantidad, subtotal) "

@@ -23,7 +23,7 @@ FOREIGN_KEY_VIOLATION = "23503"
 CATEGORIA_COLUMNS = ["id", "key", "label"]
 RECETA_COLUMNS = [
     "id", "nombre", "descripcion", "categoria_key", "tiempo_preparacion",
-    "porciones", "precio_venta", "activo", "created_at",
+    "porciones", "precio_venta", "activo", "created_at", "imagen_url",
 ]
 
 INGREDIENTE_SELECT = """
@@ -122,7 +122,8 @@ def delete_categoria(categoria_id: int, current_user: UserOut = Depends(get_curr
 def _receta_select(where: str = "") -> str:
     return (
         "SELECT recetas.id, recetas.nombre, recetas.descripcion, receta_categorias.key AS categoria_key, "
-        "recetas.tiempo_preparacion, recetas.porciones, recetas.precio_venta, recetas.activo, recetas.created_at "
+        "recetas.tiempo_preparacion, recetas.porciones, recetas.precio_venta, recetas.activo, recetas.created_at, "
+        "recetas.imagen_url "
         "FROM recetas JOIN receta_categorias ON receta_categorias.id = recetas.categoria_id " + where
     )
 
@@ -155,7 +156,8 @@ def _row_to_receta(conn, row: dict) -> RecetaOut:
         id=row["id"], nombre=row["nombre"], descripcion=row["descripcion"],
         categoria=row["categoria_key"], tiempo_preparacion=row["tiempo_preparacion"],
         porciones=row["porciones"], precio_venta=precio_venta, activo=row["activo"],
-        created_at=row["created_at"], ingredientes=ingredientes, costo_total=costo_total,
+        created_at=row["created_at"], imagen_url=row["imagen_url"],
+        ingredientes=ingredientes, costo_total=costo_total,
         margen=round(precio_venta - costo_total, 2),
     )
 
@@ -248,7 +250,8 @@ def create_receta(payload: RecetaIn, current_user: UserOut = Depends(get_current
         categoria_id = _categoria_id_for_key(conn, current_user.tenant_id, payload.categoria)
         rows = conn.run(
             "INSERT INTO recetas (usuario_id, nombre, descripcion, categoria_id, tiempo_preparacion, porciones, "
-            "precio_venta, activo) VALUES (:uid, :nombre, :descripcion, :categoria_id, :tiempo, :porciones, :precio, :activo) "
+            "precio_venta, activo, imagen_url) "
+            "VALUES (:uid, :nombre, :descripcion, :categoria_id, :tiempo, :porciones, :precio, :activo, :imagen_url) "
             "RETURNING id",
             uid=current_user.tenant_id,
             nombre=payload.nombre.strip(),
@@ -258,6 +261,7 @@ def create_receta(payload: RecetaIn, current_user: UserOut = Depends(get_current
             porciones=payload.porciones,
             precio=payload.precio_venta,
             activo=payload.activo,
+            imagen_url=payload.imagen_url,
         )
         receta_id = rows[0][0]
         _set_ingredientes(conn, current_user.tenant_id, receta_id, payload.ingredientes)
@@ -274,7 +278,8 @@ def update_receta(receta_id: int, payload: RecetaIn, current_user: UserOut = Dep
         categoria_id = _categoria_id_for_key(conn, current_user.tenant_id, payload.categoria)
         conn.run(
             "UPDATE recetas SET nombre = :nombre, descripcion = :descripcion, categoria_id = :categoria_id, "
-            "tiempo_preparacion = :tiempo, porciones = :porciones, precio_venta = :precio, activo = :activo "
+            "tiempo_preparacion = :tiempo, porciones = :porciones, precio_venta = :precio, activo = :activo, "
+            "imagen_url = :imagen_url "
             "WHERE id = :id AND usuario_id = :uid",
             id=receta_id,
             uid=current_user.tenant_id,
@@ -285,6 +290,7 @@ def update_receta(receta_id: int, payload: RecetaIn, current_user: UserOut = Dep
             porciones=payload.porciones,
             precio=payload.precio_venta,
             activo=payload.activo,
+            imagen_url=payload.imagen_url,
         )
         _set_ingredientes(conn, current_user.tenant_id, receta_id, payload.ingredientes)
         return _row_to_receta(conn, _get_receta_or_404(conn, current_user.tenant_id, receta_id))

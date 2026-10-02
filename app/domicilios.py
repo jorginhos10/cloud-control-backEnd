@@ -8,6 +8,7 @@ from app.schemas import (
     DomicilioChatMensajeIn,
     DomicilioChatMensajeOut,
     DomicilioChatResumenOut,
+    DomicilioConfigIn,
     DomicilioEstadisticasOut,
     DomicilioEstadoIn,
     DomicilioInternoIn,
@@ -15,13 +16,16 @@ from app.schemas import (
     DomicilioOut,
     DomicilioPedidoIn,
     DomicilioTokenOut,
+    DomicilioUbicacionOut,
 )
+from app.tarifas_domicilio import cargar_config, geocodificar
 
 router = APIRouter(prefix="/domicilios", dependencies=[Depends(get_current_user)])
 
 DOMICILIO_COLUMNS = [
     "id", "token_pedido", "nombre_cliente", "telefono", "direccion", "barrio", "notas",
-    "tipo", "estado", "total", "valor_domicilio", "created_at", "updated_at",
+    "tipo", "estado", "total", "valor_domicilio", "created_at", "updated_at", "metodo_pago",
+    "motivo_cancelacion",
 ]
 ITEM_COLUMNS = ["id", "receta_id", "nombre", "precio", "cantidad"]
 CHAT_COLUMNS = ["id", "de", "mensaje", "leido", "created_at"]
@@ -37,13 +41,30 @@ def _get_items(conn, domicilio_id: int) -> list[DomicilioItemOut]:
     ]
 
 
-def _row_to_domicilio(conn, row: dict) -> DomicilioOut:
+def _get_items_por_domicilios(conn, domicilio_ids: list[int]) -> dict[int, list[DomicilioItemOut]]:
+    """Trae los items de varios pedidos en una sola consulta, agrupados por domicilio_id.
+    Evita pedir los items pedido por pedido (N+1) al armar un listado completo."""
+    agrupado: dict[int, list[DomicilioItemOut]] = {did: [] for did in domicilio_ids}
+    if not domicilio_ids:
+        return agrupado
+    rows = conn.run(
+        f"SELECT domicilio_id, {', '.join(ITEM_COLUMNS)} FROM domicilio_items "
+        "WHERE domicilio_id = ANY(:ids) ORDER BY domicilio_id, id",
+        ids=domicilio_ids,
+    )
+    for r in rows:
+        agrupado[r[0]].append(DomicilioItemOut(id=r[1], receta_id=r[2], nombre=r[3], precio=float(r[4]), cantidad=r[5]))
+    return agrupado
+
+
+def _row_to_domicilio(conn, row: dict, items: list[DomicilioItemOut] | None = None) -> DomicilioOut:
     return DomicilioOut(
         id=row["id"], token_pedido=row["token_pedido"], nombre_cliente=row["nombre_cliente"],
         telefono=row["telefono"] or "", direccion=row["direccion"] or "", barrio=row["barrio"] or "",
-        notas=row["notas"] or "", tipo=row["tipo"], estado=row["estado"], total=float(row["total"]),
+        notas=row["notas"] or "", tipo=row["tipo"], metodo_pago=row["metodo_pago"] or "", estado=row["estado"], total=float(row["total"]),
         valor_domicilio=float(row["valor_domicilio"]) if row["valor_domicilio"] is not None else None,
-        created_at=row["created_at"], updated_at=row["updated_at"], items=_get_items(conn, row["id"]),
+        created_at=row["created_at"], updated_at=row["updated_at"], motivo_cancelacion=row["motivo_cancelacion"] or "",
+        items=items if items is not None else _get_items(conn, row["id"]),
     )
 
 
@@ -94,11 +115,11 @@ def crear_pedido(conn, usuario_id: int, payload: DomicilioPedidoIn, valor_domici
 
     rows = conn.run(
         "INSERT INTO domicilios "
-        "(usuario_id, token_pedido, nombre_cliente, telefono, direccion, barrio, notas, tipo, total, valor_domicilio) "
-        "VALUES (:uid, :token, :nombre, :tel, :dir, :barrio, :notas, :tipo, :total, :vd) RETURNING id",
+        "(usuario_id, token_pedido, nombre_cliente, telefono, direccion, barrio, notas, tipo, total, valor_domicilio, metodo_pago) "
+        "VALUES (:uid, :token, :nombre, :tel, :dir, :barrio, :notas, :tipo, :total, :vd, :mp) RETURNING id",
         uid=usuario_id, token=token_pedido, nombre=payload.nombre_cliente.strip(), tel=payload.telefono.strip(),
         dir=payload.direccion.strip(), barrio=payload.barrio.strip(), notas=payload.notas.strip(),
-        tipo=payload.tipo, total=total, vd=valor_domicilio,
+        tipo=payload.tipo, total=total, vd=valor_domicilio, mp=payload.metodo_pago,
     )
     domicilio_id = rows[0][0]
 
@@ -116,8 +137,8 @@ def crear_pedido(conn, usuario_id: int, payload: DomicilioPedidoIn, valor_domici
 def _validar_transicion(estado_actual: str, tipo: str, estado_nuevo: str) -> None:
     permitidas = {
         "pendiente": {"preparacion", "cancelado"},
-        "preparacion": {"listo"},
-        "listo": {"en_camino"} if tipo == "domicilio" else {"entregado"},
+        "preparacion": {"listo", "cancelado"},
+        "listo": ({"en_camino"} if tipo == "domicilio" else {"entregado"}) | {"cancelado"},
         "en_camino": {"entregado"},
     }.get(estado_actual, set())
     if estado_nuevo not in permitidas:
@@ -134,7 +155,9 @@ def list_domicilios(current_user: UserOut = Depends(get_current_user)):
             "ORDER BY created_at ASC",
             uid=current_user.tenant_id,
         )
-        return [_row_to_domicilio(conn, dict(zip(DOMICILIO_COLUMNS, r))) for r in rows]
+        dicts = [dict(zip(DOMICILIO_COLUMNS, r)) for r in rows]
+        items_por_domicilio = _get_items_por_domicilios(conn, [d["id"] for d in dicts])
+        return [_row_to_domicilio(conn, d, items_por_domicilio[d["id"]]) for d in dicts]
     finally:
         conn.close()
 
@@ -195,6 +218,110 @@ def crear_interno(payload: DomicilioInternoIn, current_user: UserOut = Depends(g
         conn.close()
 
 
+@router.get("/config", response_model=DomicilioConfigIn)
+def get_config(current_user: UserOut = Depends(get_current_user)):
+    conn = get_connection()
+    try:
+        return DomicilioConfigIn(**cargar_config(conn, current_user.tenant_id))
+    finally:
+        conn.close()
+
+
+@router.put("/config", response_model=DomicilioConfigIn)
+def guardar_config(payload: DomicilioConfigIn, current_user: UserOut = Depends(get_current_user)):
+    if payload.modo == "personalizado" and payload.valor_fijo is not None and payload.valor_fijo == 0:
+        payload.valor_fijo = None
+    if payload.modo == "automatico" and (payload.lat is None or payload.lng is None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Para el precio automático define la ubicación de tu negocio.",
+        )
+    conn = get_connection()
+    try:
+        conn.run(
+            "INSERT INTO domicilio_config (usuario_id, modo, valor_fijo, tarifa_base, km_base, valor_km, "
+            "radio_max_km, lat, lng) VALUES (:uid, :modo, :vf, :tb, :kb, :vk, :rm, :lat, :lng) "
+            "ON CONFLICT (usuario_id) DO UPDATE SET modo = :modo, valor_fijo = :vf, tarifa_base = :tb, "
+            "km_base = :kb, valor_km = :vk, radio_max_km = :rm, lat = :lat, lng = :lng, updated_at = now()",
+            uid=current_user.tenant_id, modo=payload.modo, vf=payload.valor_fijo, tb=payload.tarifa_base,
+            kb=payload.km_base, vk=payload.valor_km, rm=payload.radio_max_km, lat=payload.lat, lng=payload.lng,
+        )
+        return DomicilioConfigIn(**cargar_config(conn, current_user.tenant_id))
+    finally:
+        conn.close()
+
+
+@router.post("/config/ubicacion-desde-direccion", response_model=DomicilioUbicacionOut)
+def ubicacion_desde_direccion(current_user: UserOut = Depends(get_current_user)):
+    """Ubica el negocio a partir de la dirección y la ciudad guardadas en su perfil."""
+    conn = get_connection()
+    try:
+        rows = conn.run("SELECT direccion, ciudad FROM negocios WHERE usuario_id = :uid", uid=current_user.tenant_id)
+    finally:
+        conn.close()
+    direccion = (rows[0][0] or "").strip() if rows else ""
+    ciudad = (rows[0][1] or "").strip() if rows else ""
+    if not direccion:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Tu negocio no tiene dirección guardada. Complétala en Configuración > Negocio o usa tu ubicación actual.",
+        )
+    ubicacion = geocodificar(", ".join(p for p in (direccion, ciudad) if p))
+    if ubicacion is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No pudimos ubicar esa dirección. Usa tu ubicación actual desde el celular.",
+        )
+    return DomicilioUbicacionOut(lat=ubicacion[0], lng=ubicacion[1])
+
+
+@router.put("/{domicilio_id}", response_model=DomicilioOut)
+def modificar_pedido(domicilio_id: int, payload: DomicilioInternoIn, current_user: UserOut = Depends(get_current_user)):
+    """El negocio corrige un pedido antes de aprobarlo (ítems, datos del cliente, notas, valor del domicilio)."""
+    if not payload.items:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El pedido no tiene ítems")
+
+    conn = get_connection()
+    try:
+        dom = _get_domicilio_or_404(conn, current_user.tenant_id, domicilio_id)
+        items = _validar_items(conn, current_user.tenant_id, payload.items)
+        if not items:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ninguno de los ítems es válido")
+        total = round(sum(i["precio"] * i["cantidad"] for i in items), 2)
+        valor_domicilio = payload.valor_domicilio if payload.tipo == "domicilio" else None
+
+        rows = conn.run(
+            "UPDATE domicilios SET nombre_cliente = :nombre, telefono = :tel, direccion = :dir, barrio = :barrio, "
+            "notas = :notas, tipo = :tipo, total = :total, valor_domicilio = :vd, metodo_pago = :mp, updated_at = now() "
+            "WHERE id = :id AND estado = 'pendiente' RETURNING id",
+            id=dom["id"], nombre=payload.nombre_cliente.strip(), tel=payload.telefono.strip(),
+            dir=payload.direccion.strip(), barrio=payload.barrio.strip(), notas=payload.notas.strip(),
+            tipo=payload.tipo, total=total, vd=valor_domicilio, mp=payload.metodo_pago,
+        )
+        if not rows:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="El pedido ya no está pendiente y no se puede modificar.",
+            )
+
+        conn.run("DELETE FROM domicilio_items WHERE domicilio_id = :id", id=dom["id"])
+        for item in items:
+            conn.run(
+                "INSERT INTO domicilio_items (domicilio_id, receta_id, nombre, precio, cantidad) "
+                "VALUES (:did, :rid, :nombre, :precio, :cant)",
+                did=dom["id"], rid=item["receta_id"], nombre=item["nombre"], precio=item["precio"],
+                cant=item["cantidad"],
+            )
+        # Aviso en el chat para que el cliente vea que el negocio ajustó su pedido.
+        conn.run(
+            "INSERT INTO domicilio_chat (domicilio_id, de, mensaje) VALUES (:id, 'admin', :msg)",
+            id=dom["id"], msg="El negocio modificó tu pedido.",
+        )
+        return _row_to_domicilio(conn, _get_domicilio_or_404(conn, current_user.tenant_id, dom["id"]))
+    finally:
+        conn.close()
+
+
 @router.patch("/{domicilio_id}/estado", response_model=DomicilioOut)
 def cambiar_estado(domicilio_id: int, payload: DomicilioEstadoIn, current_user: UserOut = Depends(get_current_user)):
     conn = get_connection()
@@ -211,10 +338,28 @@ def cambiar_estado(domicilio_id: int, payload: DomicilioEstadoIn, current_user: 
                     status_code=status.HTTP_400_BAD_REQUEST, detail="Debes indicar el valor del domicilio"
                 )
 
+        motivo_cancelacion = dom["motivo_cancelacion"] or ""
+        # Un pedido "pendiente" aún no lo había visto el cliente como aceptado, así que rechazarlo
+        # no necesita explicación; cancelar uno ya en preparación o listo sí, porque el cliente lo
+        # está esperando.
+        if payload.estado == "cancelado" and dom["estado"] in ("preparacion", "listo"):
+            motivo = (payload.motivo or "").strip()
+            if not motivo:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, detail="Escribe el motivo de la cancelación"
+                )
+            motivo_cancelacion = motivo
+
         conn.run(
-            "UPDATE domicilios SET estado = :e, valor_domicilio = :vd, updated_at = now() WHERE id = :id",
-            e=payload.estado, vd=valor_domicilio, id=domicilio_id,
+            "UPDATE domicilios SET estado = :e, valor_domicilio = :vd, motivo_cancelacion = :mc, updated_at = now() "
+            "WHERE id = :id",
+            e=payload.estado, vd=valor_domicilio, mc=motivo_cancelacion, id=domicilio_id,
         )
+        if payload.estado == "cancelado" and motivo_cancelacion:
+            conn.run(
+                "INSERT INTO domicilio_chat (domicilio_id, de, mensaje) VALUES (:id, 'admin', :msg)",
+                id=domicilio_id, msg=f"Pedido cancelado: {motivo_cancelacion}",
+            )
         return _row_to_domicilio(conn, _get_domicilio_or_404(conn, current_user.tenant_id, domicilio_id))
     finally:
         conn.close()

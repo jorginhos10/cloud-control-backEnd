@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 
-from app.auth import UserOut, get_current_user
+from app.auth import UserOut, get_current_user, require_roles
 from app.database import get_connection
 from app.schemas import ConfiguracionImpresionIn, ConfiguracionImpresionOut
 
@@ -21,7 +21,7 @@ def obtener_impresion(current_user: UserOut = Depends(get_current_user)):
 
 
 @router.put("/impresion", response_model=ConfiguracionImpresionOut)
-def actualizar_impresion(payload: ConfiguracionImpresionIn, current_user: UserOut = Depends(get_current_user)):
+def actualizar_impresion(payload: ConfiguracionImpresionIn, current_user: UserOut = Depends(require_roles("admin"))):
     conn = get_connection()
     try:
         conn.run(

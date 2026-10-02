@@ -114,7 +114,13 @@ def create_perdida(payload: PerdidaIn, current_user: UserOut = Depends(get_curre
         stock_actual = float(stock_actual)
         precio = float(precio)
 
-        stock_nuevo = max(0.0, stock_actual - payload.cantidad)
+        if payload.cantidad > stock_actual:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"No hay suficiente stock de \"{nombre}\": disponible {stock_actual}",
+            )
+
+        stock_nuevo = stock_actual - payload.cantidad
         valor_perdida = round(payload.cantidad * precio, 2)
 
         conn.run("UPDATE insumos SET cantidad_stock = :s WHERE id = :id", s=stock_nuevo, id=payload.insumo_id)

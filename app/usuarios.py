@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from pg8000.exceptions import DatabaseError
 
-from app.auth import UserOut, _make_username, get_current_user, get_tenant_id
+from app.auth import UserOut, _invalidar_cache_usuario, _make_username, get_current_user, get_tenant_id
 from app.database import get_connection
 from app.schemas import (
     UsuarioActivoIn,
@@ -49,7 +49,10 @@ def _get_staff_or_404(conn, tenant_id: int, staff_id: int) -> dict:
 
 
 @router.get("", response_model=list[UsuarioStaffOut])
-def list_usuarios(tenant_id: int = Depends(get_tenant_id)):
+def list_usuarios(current_user: UserOut = Depends(get_current_user), tenant_id: int = Depends(get_tenant_id)):
+    # numero_documento viaja en esta respuesta y es la contraseña inicial de cada cuenta —
+    # solo el propietario puede verla, igual que ya exigían todos los demás endpoints de este router.
+    _require_propietario(current_user)
     conn = get_connection()
     try:
         rows = conn.run(
@@ -142,6 +145,9 @@ def toggle_activo(
             f"UPDATE usuarios SET activo = :activo WHERE id = :id RETURNING {', '.join(STAFF_COLUMNS)}",
             id=staff_id, activo=payload.activo,
         )
+        # Si se desactivó, que no le sirvan las peticiones que ya tenía en camino con la sesión en caché.
+        if not payload.activo:
+            _invalidar_cache_usuario(staff_id)
         return _row_to_staff(dict(zip(STAFF_COLUMNS, rows[0])))
     finally:
         conn.close()

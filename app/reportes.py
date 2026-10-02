@@ -3,7 +3,7 @@ from datetime import date, datetime, time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from app.auth import UserOut, get_current_user
+from app.auth import UserOut, get_current_user, require_roles
 from app.database import get_connection
 from app.schemas import (
     CierreZMesOut,
@@ -16,7 +16,8 @@ from app.schemas import (
     ReporteXProductoOut,
 )
 
-router = APIRouter(prefix="/reportes", dependencies=[Depends(get_current_user)])
+# Reportes financieros: solo propietario o staff "admin", nunca mesero/cocina/inventario.
+router = APIRouter(prefix="/reportes", dependencies=[Depends(require_roles("admin"))])
 
 
 @router.get("/x", response_model=ReporteXOut)
@@ -83,9 +84,12 @@ def reporte_x(fecha: date | None = Query(default=None), current_user: UserOut = 
 
 
 def _calcular_periodo(conn, usuario_id: int, desde: datetime, hasta: datetime):
+    # El límite inferior es exclusivo a propósito: `hasta` de un cierre pasa a ser el `desde`
+    # del siguiente, y con BETWEEN (inclusivo en ambos extremos) una venta justo en ese
+    # instante se contaría en los dos cierres.
     general = conn.run(
         "SELECT COUNT(*), COALESCE(SUM(total), 0) FROM ventas "
-        "WHERE usuario_id = :uid AND estado = 'cerrada' AND fecha_cierre BETWEEN :desde AND :hasta",
+        "WHERE usuario_id = :uid AND estado = 'cerrada' AND fecha_cierre > :desde AND fecha_cierre <= :hasta",
         uid=usuario_id, desde=desde, hasta=hasta,
     )[0]
 
@@ -96,7 +100,7 @@ def _calcular_periodo(conn, usuario_id: int, desde: datetime, hasta: datetime):
         "JOIN ventas v ON v.id = vi.venta_id "
         "LEFT JOIN recetas r ON r.id = vi.receta_id "
         "LEFT JOIN receta_categorias rc ON rc.id = r.categoria_id "
-        "WHERE v.usuario_id = :uid AND v.estado = 'cerrada' AND v.fecha_cierre BETWEEN :desde AND :hasta "
+        "WHERE v.usuario_id = :uid AND v.estado = 'cerrada' AND v.fecha_cierre > :desde AND v.fecha_cierre <= :hasta "
         "GROUP BY vi.receta_id, vi.nombre, rc.label "
         "ORDER BY cant DESC LIMIT 20",
         uid=usuario_id, desde=desde, hasta=hasta,
@@ -109,14 +113,16 @@ def _calcular_periodo(conn, usuario_id: int, desde: datetime, hasta: datetime):
 
 
 def _fecha_desde_pendiente(conn, usuario_id: int) -> datetime:
+    """Desde cuándo está pendiente de cerrar. Siempre es el `fecha_hasta` real del último
+    cierre, sin importar qué tan viejo sea — si se salta un día sin generar el Z, esas
+    ventas deben seguir apareciendo como pendientes, nunca desaparecer del reporte."""
     ultimo = conn.run(
         "SELECT fecha_hasta FROM cierres_z WHERE usuario_id = :uid ORDER BY fecha_hasta DESC LIMIT 1",
         uid=usuario_id,
     )
-    hoy_medianoche = datetime.combine(date.today(), time.min)
-    if ultimo and ultimo[0][0] >= hoy_medianoche:
+    if ultimo:
         return ultimo[0][0]
-    return hoy_medianoche
+    return datetime.combine(date.today(), time.min)
 
 
 @router.get("/z", response_model=list[CierreZResumenOut])
@@ -182,10 +188,6 @@ def generar_cierre_z(current_user: UserOut = Depends(get_current_user)):
         desde = _fecha_desde_pendiente(conn, current_user.tenant_id)
         hasta = datetime.now()
         total_ventas, total_monto, por_producto = _calcular_periodo(conn, current_user.tenant_id, desde, hasta)
-        if total_ventas == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail="No hay ventas nuevas para cerrar"
-            )
 
         numero = conn.run(
             "SELECT COALESCE(MAX(numero_z), 0) + 1 FROM cierres_z WHERE usuario_id = :uid", uid=current_user.tenant_id

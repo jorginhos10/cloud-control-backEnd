@@ -1,5 +1,7 @@
 import os
 import re
+import threading
+import time
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -17,8 +19,10 @@ UNIQUE_VIOLATION = "23505"
 
 USER_COLUMNS = [
     "id", "username", "nombre", "email", "rol", "activo", "propietario", "ultimo_login", "propietario_id",
-    "fecha_creacion",
+    "fecha_creacion", "estado_aprobacion", "motivo_rechazo",
 ]
+
+CUENTA_PENDIENTE_DETAIL = "Tu cuenta está pendiente de aprobación"
 
 DEFAULT_CATEGORIAS = [
     ("entrada", "Entrada", 1),
@@ -55,6 +59,8 @@ def _row_to_user(row: dict) -> UserOut:
         propietario_id=row["propietario_id"],
         tenant_id=row["propietario_id"] or row["id"],
         fecha_creacion=row["fecha_creacion"],
+        estado_aprobacion=row["estado_aprobacion"],
+        motivo_rechazo=row["motivo_rechazo"],
     )
 
 
@@ -116,8 +122,9 @@ def register(payload: RegisterIn, request: Request):
         try:
             rows = conn.run(
                 f"""
-                INSERT INTO usuarios (username, nombre, email, password_hash, rol, activo, propietario, pais)
-                VALUES (:username, :nombre, :email, :password_hash, 'admin', true, true, :pais)
+                INSERT INTO usuarios (username, nombre, email, password_hash, rol, activo, propietario, pais,
+                                      estado_aprobacion)
+                VALUES (:username, :nombre, :email, :password_hash, 'admin', true, true, :pais, 'pendiente_datos')
                 RETURNING {", ".join(USER_COLUMNS)}
                 """,
                 username=username,
@@ -198,9 +205,36 @@ def impersonate(payload: ImpersonateIn, x_service_secret: str = Header(default="
         conn.close()
 
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> UserOut:
+# Una ráfaga de peticiones con el mismo token (el dashboard pidiendo varios paneles a la vez, o el
+# sondeo de Cocina/Domicilios cada pocos segundos) no necesita repetir la consulta del usuario en
+# cada una — se reutiliza por unos segundos. El TTL es corto a propósito: una cuenta que se
+# desactiva a mitad de camino deja de pasar casi de inmediato, no en la próxima hora.
+_SESSION_CACHE_TTL_S = float(os.environ.get("SESSION_CACHE_TTL_S", "4"))
+_session_cache: dict[str, tuple[float, UserOut]] = {}
+_session_cache_lock = threading.Lock()
+
+
+def _invalidar_cache_usuario(user_id: int) -> None:
+    """Se llama tras cambiar datos propios del usuario (perfil, aprobación) para que el cambio se
+    vea de inmediato y no haya que esperar a que expire la caché."""
+    with _session_cache_lock:
+        for clave in [c for c, (_, u) in _session_cache.items() if u.id == user_id]:
+            del _session_cache[clave]
+
+
+def get_current_user_any_status(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> UserOut:
+    """Authenticates without requiring the account to be approved — only for the
+    endpoints a not-yet-approved owner needs (/auth/me and /onboarding). Everything
+    else goes through get_current_user."""
+    token = credentials.credentials
+    now = time.monotonic()
+
+    cached = _session_cache.get(token)
+    if cached and cached[0] > now:
+        return cached[1]
+
     try:
-        payload = decode_access_token(credentials.credentials)
+        payload = decode_access_token(token)
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido o expirado")
 
@@ -215,13 +249,25 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_
         row = dict(zip(USER_COLUMNS, rows[0]))
         if not row["activo"]:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cuenta desactivada")
-        return _row_to_user(row)
+        user = _row_to_user(row)
     finally:
         conn.close()
 
+    with _session_cache_lock:
+        if len(_session_cache) > 2000:
+            _session_cache.clear()
+        _session_cache[token] = (now + _SESSION_CACHE_TTL_S, user)
+    return user
+
+
+def get_current_user(user: UserOut = Depends(get_current_user_any_status)) -> UserOut:
+    if user.estado_aprobacion != "aprobado":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=CUENTA_PENDIENTE_DETAIL)
+    return user
+
 
 @router.get("/me", response_model=UserOut)
-def me(current_user: UserOut = Depends(get_current_user)):
+def me(current_user: UserOut = Depends(get_current_user_any_status)):
     return current_user
 
 
@@ -257,6 +303,21 @@ def cambiar_password(payload: CambiarPasswordIn, current_user: UserOut = Depends
         )
     finally:
         conn.close()
+
+
+def require_roles(*roles: str):
+    """Guardia para endpoints que solo el propietario o el personal con alguno de estos
+    `rol` puede usar (ej. nómina, reportes, ajustes del negocio). El propietario siempre
+    pasa sin importar su `rol`. Antes de esto, el rol del staff (mesero/cocina/inventario)
+    solo se filtraba en el frontend — cualquier cuenta con token válido podía llamar
+    estos endpoints igual; esto cierra esa puerta del lado del servidor."""
+
+    def checker(current_user: UserOut = Depends(get_current_user)) -> UserOut:
+        if current_user.propietario or current_user.rol in roles:
+            return current_user
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No tienes permiso para esto")
+
+    return checker
 
 
 def get_tenant_id(current_user: UserOut = Depends(get_current_user)) -> int:

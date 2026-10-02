@@ -139,10 +139,27 @@ def create_activo(payload: ActivoFijoIn, current_user: UserOut = Depends(get_cur
 def update_activo(activo_id: int, payload: ActivoFijoIn, current_user: UserOut = Depends(get_current_user)):
     conn = get_connection()
     try:
-        _get_activo_or_404(conn, current_user.tenant_id, activo_id)
+        actual = _get_activo_or_404(conn, current_user.tenant_id, activo_id)
+        # El estado se podía mandar desde este formulario pero el UPDATE de abajo nunca lo
+        # tocaba: se perdía en silencio. Si de verdad cambió, se guarda y queda en el historial
+        # igual que si se hubiera usado el endpoint dedicado de cambio de estado.
+        if payload.estado != actual["estado"]:
+            conn.run(
+                "INSERT INTO activos_fijos_historial "
+                "(activo_id, usuario_id, estado_anterior, estado_nuevo, cantidad_anterior, cantidad_nueva, nota, registrado_por_id) "
+                "VALUES (:activo_id, :uid, :estado_anterior, :estado_nuevo, :cantidad_anterior, :cantidad_nueva, :nota, :registrado_por)",
+                activo_id=activo_id,
+                uid=current_user.tenant_id,
+                estado_anterior=actual["estado"],
+                estado_nuevo=payload.estado,
+                cantidad_anterior=actual["cantidad"],
+                cantidad_nueva=payload.cantidad,
+                nota="Editado desde el formulario del activo",
+                registrado_por=current_user.id,
+            )
         rows = conn.run(
             "UPDATE activos_fijos SET nombre = :nombre, descripcion = :descripcion, categoria = :categoria, "
-            "cantidad = :cantidad, ubicacion = :ubicacion, valor_unitario = :valor, activo = :activo "
+            "cantidad = :cantidad, ubicacion = :ubicacion, estado = :estado, valor_unitario = :valor, activo = :activo "
             f"WHERE id = :id AND usuario_id = :uid RETURNING {', '.join(ACTIVO_COLUMNS)}",
             id=activo_id,
             uid=current_user.tenant_id,
@@ -151,6 +168,7 @@ def update_activo(activo_id: int, payload: ActivoFijoIn, current_user: UserOut =
             categoria=payload.categoria,
             cantidad=payload.cantidad,
             ubicacion=payload.ubicacion.strip(),
+            estado=payload.estado,
             valor=payload.valor_unitario,
             activo=payload.activo,
         )
