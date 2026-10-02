@@ -576,7 +576,9 @@ def listado_ventas(
                 for r in d_rows
             ]
 
-        items.sort(key=lambda i: i.fecha, reverse=True)
+        # ventas.fecha_apertura trae zona horaria; domicilios.created_at no — sin normalizar,
+        # comparar ambas revienta con "can't compare offset-naive and offset-aware datetimes".
+        items.sort(key=lambda i: i.fecha.replace(tzinfo=None) if i.fecha.tzinfo else i.fecha, reverse=True)
         total = len(items)
         monto_total = sum(i.total for i in items)
         total_paginas = max(1, -(-total // POR_PAGINA))
