@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.auth import UserOut, get_current_user
 from app.database import get_connection
+from app.sabores import sabores_por_receta
 from app.schemas import (
     CatalogoItemOut,
     CocinaItemOut,
@@ -184,7 +185,8 @@ CATALOGO_SELECT = """
             FROM receta_insumos ri
             JOIN insumos i ON i.id = ri.id_insumo
             WHERE ri.id_receta = recetas.id
-        ) AS disponible
+        ) AS disponible,
+        recetas.imagen_url
     FROM recetas
     JOIN receta_categorias ON receta_categorias.id = recetas.categoria_id
     WHERE recetas.usuario_id = :uid AND recetas.activo = true
@@ -203,10 +205,13 @@ def catalogo(q: str = Query(default=""), current_user: UserOut = Depends(get_cur
             )
         else:
             rows = conn.run(CATALOGO_SELECT + " ORDER BY recetas.nombre", uid=current_user.tenant_id)
+        sabores = sabores_por_receta(conn, [r[0] for r in rows])
         return [
             CatalogoItemOut(
                 id=r[0], nombre=r[1], categoria=r[2], precio_venta=float(r[3]),
                 disponible=int(r[4]) if r[4] is not None else None,
+                imagen_url=r[5],
+                sabores=sabores.get(r[0], []),
             )
             for r in rows
         ]
@@ -229,7 +234,7 @@ COCINA_ORDENES_SELECT = """
 """
 
 COCINA_ITEMS_SELECT = """
-    SELECT vi.id, vi.nombre, vi.cantidad, COALESCE(rc.label, 'Otro') AS categoria
+    SELECT vi.id, vi.nombre, vi.cantidad, COALESCE(rc.label, 'Otro') AS categoria, vi.sabor_nombre
     FROM venta_items vi
     LEFT JOIN recetas r ON r.id = vi.receta_id
     LEFT JOIN receta_categorias rc ON rc.id = r.categoria_id
@@ -250,7 +255,7 @@ DOMICILIO_ORDENES_SELECT = """
 """
 
 DOMICILIO_ITEMS_SELECT = """
-    SELECT di.id, di.nombre, di.cantidad, COALESCE(rc.label, 'Otro') AS categoria
+    SELECT di.id, di.nombre, di.cantidad, COALESCE(rc.label, 'Otro') AS categoria, di.sabor_nombre
     FROM domicilio_items di
     LEFT JOIN recetas r ON r.id = di.receta_id
     LEFT JOIN receta_categorias rc ON rc.id = r.categoria_id
@@ -272,7 +277,7 @@ def _cocina_ordenes_de_ventas(conn, uid: int) -> list[CocinaOrdenOut]:
             CocinaOrdenOut(
                 id=r[0], tipo=r[1], estado=r[2], notas=r[3], fecha_apertura=r[4],
                 mesa_numero=r[5], mesa_nombre=r[6], mesa_zona=r[7],
-                items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3]) for i in item_rows],
+                items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3], sabor_nombre=i[4]) for i in item_rows],
             )
         )
     return ordenes
@@ -286,7 +291,7 @@ def _cocina_ordenes_de_domicilios(conn, uid: int) -> list[CocinaOrdenOut]:
         ordenes.append(
             CocinaOrdenOut(
                 id=r[0], tipo=r[1], estado=_ESTADO_DOMICILIO_A_COCINA[r[2]], notas=r[3] or "", fecha_apertura=r[4],
-                items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3]) for i in item_rows],
+                items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3], sabor_nombre=i[4]) for i in item_rows],
                 origen="domicilio", cliente_nombre=r[5], direccion=r[6],
             )
         )
@@ -348,7 +353,7 @@ def cocina_historial(current_user: UserOut = Depends(get_current_user)):
                 CocinaOrdenOut(
                     id=r[0], tipo=r[1], estado=r[2], notas=r[3], fecha_apertura=r[4],
                     mesa_numero=r[5], mesa_nombre=r[6], mesa_zona=r[7],
-                    items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3]) for i in item_rows],
+                    items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3], sabor_nombre=i[4]) for i in item_rows],
                 )
             )
 
@@ -358,7 +363,7 @@ def cocina_historial(current_user: UserOut = Depends(get_current_user)):
             ordenes.append(
                 CocinaOrdenOut(
                     id=r[0], tipo=r[1], estado=_ESTADO_DOMICILIO_A_HISTORIAL[r[2]], notas=r[3] or "", fecha_apertura=r[4],
-                    items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3]) for i in item_rows],
+                    items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3], sabor_nombre=i[4]) for i in item_rows],
                     origen="domicilio", cliente_nombre=r[5], direccion=r[6],
                 )
             )
@@ -372,14 +377,14 @@ VENTA_COLUMNS = [
     "notas", "metodo_pago", "pago_efectivo", "pago_tarjeta", "pago_transferencia", "propina",
     "fecha_apertura", "fecha_cierre", "cliente_id",
 ]
-ITEM_COLUMNS = ["id", "receta_id", "nombre", "cantidad", "precio_unitario", "subtotal"]
+ITEM_COLUMNS = ["id", "receta_id", "nombre", "cantidad", "precio_unitario", "subtotal", "sabor_nombre"]
 
 
 def _row_to_item(row) -> VentaItemOut:
     d = dict(zip(ITEM_COLUMNS, row))
     return VentaItemOut(
         id=d["id"], receta_id=d["receta_id"], nombre=d["nombre"], cantidad=d["cantidad"],
-        precio_unitario=float(d["precio_unitario"]), subtotal=float(d["subtotal"]),
+        precio_unitario=float(d["precio_unitario"]), subtotal=float(d["subtotal"]), sabor_nombre=d["sabor_nombre"],
     )
 
 
@@ -738,16 +743,30 @@ def agregar_item(venta_id: int, payload: VentaItemIn, current_user: UserOut = De
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La receta indicada no existe o está inactiva")
         nombre, precio_venta = receta[0][0], float(receta[0][1])
 
+        sabor_nombre = None
+        if payload.sabor_id is not None:
+            sabor = conn.run(
+                "SELECT s.nombre FROM receta_sabores rs JOIN sabores s ON s.id = rs.id_sabor "
+                "WHERE rs.id_receta = :rid AND s.id = :sid",
+                rid=payload.receta_id, sid=payload.sabor_id,
+            )
+            if not sabor:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ese sabor no está disponible para esta receta")
+            sabor_nombre = sabor[0][0]
+
         consumo = _consumo_de_receta(conn, payload.receta_id, payload.cantidad)
 
         conn.run("BEGIN")
         try:
             _consumir_stock(conn, consumo)
 
+            # Dos sabores del mismo plato son líneas distintas: no se suman entre sí.
             existente = conn.run(
-                "SELECT id, cantidad FROM venta_items WHERE venta_id = :vid AND receta_id = :rid",
+                "SELECT id, cantidad FROM venta_items WHERE venta_id = :vid AND receta_id = :rid "
+                "AND sabor_id IS NOT DISTINCT FROM :sid",
                 vid=venta_id,
                 rid=payload.receta_id,
+                sid=payload.sabor_id,
             )
             if existente:
                 item_id, cantidad_actual = existente[0]
@@ -761,14 +780,17 @@ def agregar_item(venta_id: int, payload: VentaItemIn, current_user: UserOut = De
             else:
                 subtotal = round(payload.cantidad * precio_venta, 2)
                 conn.run(
-                    "INSERT INTO venta_items (venta_id, receta_id, nombre, cantidad, precio_unitario, subtotal) "
-                    "VALUES (:vid, :rid, :nombre, :cant, :precio, :subtotal)",
+                    "INSERT INTO venta_items (venta_id, receta_id, nombre, cantidad, precio_unitario, subtotal, "
+                    "sabor_id, sabor_nombre) "
+                    "VALUES (:vid, :rid, :nombre, :cant, :precio, :subtotal, :sid, :sabor_nombre)",
                     vid=venta_id,
                     rid=payload.receta_id,
                     nombre=nombre,
                     cant=payload.cantidad,
                     precio=precio_venta,
                     subtotal=subtotal,
+                    sid=payload.sabor_id,
+                    sabor_nombre=sabor_nombre,
                 )
             # Un pedido nuevo en una orden ya servida/lista es comida que falta por preparar:
             # vuelve a "abierta" para que cocina la vea de nuevo en su tablero.

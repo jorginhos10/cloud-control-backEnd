@@ -134,6 +134,21 @@ def _tema_automatico_default() -> str:
         sconn.close()
 
 
+def resolver_apariencia_publica(apariencia: str) -> str:
+    """Resuelve "Automático" a un estilo concreto para páginas públicas (menú, domicilios):
+    ahí no hay sesión desde la que el front pueda pedir el estilo por defecto del SuperAdmin,
+    así que hay que mandarlo ya resuelto. Debe reflejar las mismas fechas que
+    ThemeService.temaPorFecha en el frontend (Halloween en octubre, Navidad en diciembre)."""
+    if apariencia != "automatico":
+        return apariencia
+    mes = datetime.now().month
+    if mes == 10:
+        return "halloween"
+    if mes == 12:
+        return "navidad"
+    return _tema_automatico_default()
+
+
 @router.get("/apariencia", response_model=NegocioAparienciaOut)
 def get_apariencia(current_user: UserOut = Depends(get_current_user)):
     conn = get_connection()

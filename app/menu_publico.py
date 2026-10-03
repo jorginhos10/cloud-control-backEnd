@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, status
 from app.database import get_connection
 from app.schemas import MenuPedidoIn, MenuPedidoOut, MenuPublicoDetalleOut, OrdenPublicaOut, VentaItemOut
 from app.menu_digital import _get_items, _row_to_menu
+from app.negocios import resolver_apariencia_publica
 from app.ventas import _consumir_stock, _consumo_de_receta, _recalcular_total
 
 router = APIRouter(prefix="/menu")
@@ -45,6 +46,7 @@ def ver_menu(token: str):
         negocio_nombre, negocio_logo_url, negocio_eslogan, negocio_apariencia = (
             negocio_rows[0] if negocio_rows else ("", None, "", "violet-original")
         )
+        negocio_apariencia = resolver_apariencia_publica(negocio_apariencia)
 
         return MenuPublicoDetalleOut(
             **_row_to_menu(row).model_dump(),

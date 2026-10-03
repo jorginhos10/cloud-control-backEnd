@@ -27,7 +27,7 @@ DOMICILIO_COLUMNS = [
     "tipo", "estado", "total", "valor_domicilio", "created_at", "updated_at", "metodo_pago",
     "motivo_cancelacion",
 ]
-ITEM_COLUMNS = ["id", "receta_id", "nombre", "precio", "cantidad"]
+ITEM_COLUMNS = ["id", "receta_id", "nombre", "precio", "cantidad", "sabor_id", "sabor_nombre"]
 CHAT_COLUMNS = ["id", "de", "mensaje", "leido", "created_at"]
 
 
@@ -37,7 +37,10 @@ def _get_items(conn, domicilio_id: int) -> list[DomicilioItemOut]:
         id=domicilio_id,
     )
     return [
-        DomicilioItemOut(id=r[0], receta_id=r[1], nombre=r[2], precio=float(r[3]), cantidad=r[4]) for r in rows
+        DomicilioItemOut(
+            id=r[0], receta_id=r[1], nombre=r[2], precio=float(r[3]), cantidad=r[4], sabor_id=r[5], sabor_nombre=r[6]
+        )
+        for r in rows
     ]
 
 
@@ -53,7 +56,12 @@ def _get_items_por_domicilios(conn, domicilio_ids: list[int]) -> dict[int, list[
         ids=domicilio_ids,
     )
     for r in rows:
-        agrupado[r[0]].append(DomicilioItemOut(id=r[1], receta_id=r[2], nombre=r[3], precio=float(r[4]), cantidad=r[5]))
+        agrupado[r[0]].append(
+            DomicilioItemOut(
+                id=r[1], receta_id=r[2], nombre=r[3], precio=float(r[4]), cantidad=r[5],
+                sabor_id=r[6], sabor_nombre=r[7],
+            )
+        )
     return agrupado
 
 
@@ -98,7 +106,23 @@ def _validar_items(conn, usuario_id: int, items_in) -> list[dict]:
         if not receta:
             continue
         nombre, precio = receta[0][0], float(receta[0][1])
-        resultado.append({"receta_id": item.receta_id, "nombre": nombre, "precio": precio, "cantidad": item.cantidad})
+
+        sabor_id = getattr(item, "sabor_id", None)
+        sabor_nombre = None
+        if sabor_id is not None:
+            sabor = conn.run(
+                "SELECT s.nombre FROM receta_sabores rs JOIN sabores s ON s.id = rs.id_sabor "
+                "WHERE rs.id_receta = :rid AND s.id = :sid",
+                rid=item.receta_id, sid=sabor_id,
+            )
+            if not sabor:
+                continue
+            sabor_nombre = sabor[0][0]
+
+        resultado.append({
+            "receta_id": item.receta_id, "nombre": nombre, "precio": precio, "cantidad": item.cantidad,
+            "sabor_id": sabor_id, "sabor_nombre": sabor_nombre,
+        })
     return resultado
 
 
@@ -125,10 +149,10 @@ def crear_pedido(conn, usuario_id: int, payload: DomicilioPedidoIn, valor_domici
 
     for item in items:
         conn.run(
-            "INSERT INTO domicilio_items (domicilio_id, receta_id, nombre, precio, cantidad) "
-            "VALUES (:did, :rid, :nombre, :precio, :cant)",
+            "INSERT INTO domicilio_items (domicilio_id, receta_id, nombre, precio, cantidad, sabor_id, sabor_nombre) "
+            "VALUES (:did, :rid, :nombre, :precio, :cant, :sid, :sabor_nombre)",
             did=domicilio_id, rid=item["receta_id"], nombre=item["nombre"], precio=item["precio"],
-            cant=item["cantidad"],
+            cant=item["cantidad"], sid=item["sabor_id"], sabor_nombre=item["sabor_nombre"],
         )
 
     return domicilio_id
@@ -307,10 +331,10 @@ def modificar_pedido(domicilio_id: int, payload: DomicilioInternoIn, current_use
         conn.run("DELETE FROM domicilio_items WHERE domicilio_id = :id", id=dom["id"])
         for item in items:
             conn.run(
-                "INSERT INTO domicilio_items (domicilio_id, receta_id, nombre, precio, cantidad) "
-                "VALUES (:did, :rid, :nombre, :precio, :cant)",
+                "INSERT INTO domicilio_items (domicilio_id, receta_id, nombre, precio, cantidad, sabor_id, sabor_nombre) "
+                "VALUES (:did, :rid, :nombre, :precio, :cant, :sid, :sabor_nombre)",
                 did=dom["id"], rid=item["receta_id"], nombre=item["nombre"], precio=item["precio"],
-                cant=item["cantidad"],
+                cant=item["cantidad"], sid=item["sabor_id"], sabor_nombre=item["sabor_nombre"],
             )
         # Aviso en el chat para que el cliente vea que el negocio ajustó su pedido.
         conn.run(

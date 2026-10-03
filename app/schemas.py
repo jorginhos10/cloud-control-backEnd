@@ -160,6 +160,7 @@ class MesaCambioIn(BaseModel):
 class VentaItemIn(BaseModel):
     receta_id: int
     cantidad: int = Field(ge=1, default=1)
+    sabor_id: Optional[int] = None
 
 
 class VentaItemCantidadIn(BaseModel):
@@ -173,6 +174,7 @@ class VentaItemOut(BaseModel):
     cantidad: int
     precio_unitario: float
     subtotal: float
+    sabor_nombre: Optional[str] = None
 
 
 class VentaOut(BaseModel):
@@ -249,6 +251,20 @@ class VentaListadoOut(BaseModel):
     total_paginas: int
 
 
+class SaborIn(BaseModel):
+    nombre: str = Field(min_length=1, max_length=80)
+
+
+class SaborActivoIn(BaseModel):
+    activo: bool
+
+
+class SaborOut(BaseModel):
+    id: int
+    nombre: str
+    activo: bool
+
+
 class CatalogoItemOut(BaseModel):
     id: int
     nombre: str
@@ -256,6 +272,7 @@ class CatalogoItemOut(BaseModel):
     precio_venta: float
     disponible: Optional[int] = None
     imagen_url: Optional[str] = None
+    sabores: list[SaborOut] = []
 
 
 class NegocioPublicoOut(BaseModel):
@@ -270,6 +287,7 @@ class CocinaItemOut(BaseModel):
     nombre: str
     cantidad: int
     categoria: str
+    sabor_nombre: Optional[str] = None
 
 
 class CocinaOrdenOut(BaseModel):
@@ -457,20 +475,6 @@ class CategoriaRecetaOut(BaseModel):
 class RecetaIngredienteIn(BaseModel):
     id_insumo: int
     cantidad: float = Field(gt=0)
-
-
-class SaborIn(BaseModel):
-    nombre: str = Field(min_length=1, max_length=80)
-
-
-class SaborActivoIn(BaseModel):
-    activo: bool
-
-
-class SaborOut(BaseModel):
-    id: int
-    nombre: str
-    activo: bool
 
 
 class RecetaIn(BaseModel):
@@ -694,6 +698,7 @@ EstadoDomicilio = Literal["pendiente", "preparacion", "listo", "en_camino", "ent
 class DomicilioItemIn(BaseModel):
     receta_id: int
     cantidad: int = Field(ge=1, default=1)
+    sabor_id: Optional[int] = None
 
 
 class DomicilioPedidoIn(BaseModel):
@@ -777,6 +782,8 @@ class DomicilioItemOut(BaseModel):
     nombre: str
     precio: float
     cantidad: int
+    sabor_id: Optional[int] = None
+    sabor_nombre: Optional[str] = None
 
 
 class DomicilioOut(BaseModel):

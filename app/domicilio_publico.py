@@ -22,6 +22,8 @@ from app.schemas import (
     NegocioPublicoOut,
 )
 from app.lugares import autocompletar, detalle_lugar, direccion_desde_coordenadas, limitar
+from app.negocios import resolver_apariencia_publica
+from app.sabores import sabores_por_receta
 from app.tarifas_domicilio import cotizar
 
 router = APIRouter(prefix="/domicilio-publico")
@@ -61,7 +63,9 @@ def negocio(token: str):
         if not rows:
             return NegocioPublicoOut()
         nombre, logo_url, eslogan, apariencia = rows[0]
-        return NegocioPublicoOut(nombre=nombre, logo_url=logo_url, eslogan=eslogan, apariencia=apariencia)
+        return NegocioPublicoOut(
+            nombre=nombre, logo_url=logo_url, eslogan=eslogan, apariencia=resolver_apariencia_publica(apariencia)
+        )
     finally:
         conn.close()
 
@@ -72,11 +76,13 @@ def catalogo(token: str):
     try:
         usuario_id = _resolver_usuario(conn, token)
         rows = conn.run(CATALOGO_SELECT, uid=usuario_id)
+        sabores = sabores_por_receta(conn, [r[0] for r in rows])
         return [
             CatalogoItemOut(
                 id=r[0], nombre=r[1], categoria=r[2], precio_venta=float(r[3]),
                 disponible=int(r[4]) if r[4] is not None else None,
                 imagen_url=r[5],
+                sabores=sabores.get(r[0], []),
             )
             for r in rows
         ]
