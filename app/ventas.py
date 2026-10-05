@@ -761,15 +761,21 @@ def agregar_item(venta_id: int, payload: VentaItemIn, current_user: UserOut = De
             sabor_nombre = sabor[0][0]
 
         topping_nombre = None
+        topping_extra = 0.0
         if payload.topping_id is not None:
             topping = conn.run(
-                "SELECT t.nombre FROM receta_toppings rt JOIN toppings t ON t.id = rt.id_topping "
+                "SELECT t.nombre, rt.precio_adicional FROM receta_toppings rt JOIN toppings t ON t.id = rt.id_topping "
                 "WHERE rt.id_receta = :rid AND t.id = :tid",
                 rid=payload.receta_id, tid=payload.topping_id,
             )
             if not topping:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ese topping no está disponible para esta receta")
             topping_nombre = topping[0][0]
+            topping_extra = float(topping[0][1])
+
+        # El valor adicional del topping (si tiene) se suma al precio de venta de la receta para
+        # formar el precio unitario real de esta línea.
+        precio_unitario = precio_venta + topping_extra
 
         consumo = _consumo_de_receta(conn, payload.receta_id, payload.cantidad)
 
@@ -792,11 +798,11 @@ def agregar_item(venta_id: int, payload: VentaItemIn, current_user: UserOut = De
                 conn.run(
                     "UPDATE venta_items SET cantidad = :cant, subtotal = :subtotal WHERE id = :id",
                     cant=nueva_cantidad,
-                    subtotal=round(nueva_cantidad * precio_venta, 2),
+                    subtotal=round(nueva_cantidad * precio_unitario, 2),
                     id=item_id,
                 )
             else:
-                subtotal = round(payload.cantidad * precio_venta, 2)
+                subtotal = round(payload.cantidad * precio_unitario, 2)
                 conn.run(
                     "INSERT INTO venta_items (venta_id, receta_id, nombre, cantidad, precio_unitario, subtotal, "
                     "sabor_id, sabor_nombre, topping_id, topping_nombre) "
@@ -805,7 +811,7 @@ def agregar_item(venta_id: int, payload: VentaItemIn, current_user: UserOut = De
                     rid=payload.receta_id,
                     nombre=nombre,
                     cant=payload.cantidad,
-                    precio=precio_venta,
+                    precio=precio_unitario,
                     subtotal=subtotal,
                     sid=payload.sabor_id,
                     sabor_nombre=sabor_nombre,

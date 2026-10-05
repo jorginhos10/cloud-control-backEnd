@@ -14,8 +14,8 @@ from app.schemas import (
     RecetaIn,
     RecetaIngredienteOut,
     RecetaOut,
+    RecetaToppingOut,
     SaborOut,
-    ToppingOut,
 )
 
 router = APIRouter(prefix="/recetas", dependencies=[Depends(get_current_user)])
@@ -45,7 +45,7 @@ SABOR_DE_RECETA_SELECT = """
 """
 
 TOPPING_DE_RECETA_SELECT = """
-    SELECT t.id, t.nombre, t.activo
+    SELECT t.id, t.nombre, t.activo, rt.precio_adicional
     FROM receta_toppings rt
     JOIN toppings t ON t.id = rt.id_topping
     WHERE rt.id_receta = :id_receta
@@ -171,9 +171,9 @@ def _get_sabores(conn, receta_id: int) -> list[SaborOut]:
     return [SaborOut(id=r[0], nombre=r[1], activo=r[2]) for r in rows]
 
 
-def _get_toppings(conn, receta_id: int) -> list[ToppingOut]:
+def _get_toppings(conn, receta_id: int) -> list[RecetaToppingOut]:
     rows = conn.run(TOPPING_DE_RECETA_SELECT, id_receta=receta_id)
-    return [ToppingOut(id=r[0], nombre=r[1], activo=r[2]) for r in rows]
+    return [RecetaToppingOut(id=r[0], nombre=r[1], activo=r[2], precio_adicional=float(r[3])) for r in rows]
 
 
 def _row_to_receta(conn, row: dict) -> RecetaOut:
@@ -277,17 +277,21 @@ def _set_sabores(conn, usuario_id: int, receta_id: int, sabor_ids: list[int]) ->
         )
 
 
-def _set_toppings(conn, usuario_id: int, receta_id: int, topping_ids: list[int]) -> None:
+def _set_toppings(conn, usuario_id: int, receta_id: int, toppings: list) -> None:
     conn.run("DELETE FROM receta_toppings WHERE id_receta = :id", id=receta_id)
-    for topping_id in set(topping_ids):
+    vistos: set[int] = set()
+    for t in toppings:
+        if t.id in vistos:
+            continue
+        vistos.add(t.id)
         existe = conn.run(
-            "SELECT 1 FROM toppings WHERE id = :id AND usuario_id = :uid", id=topping_id, uid=usuario_id
+            "SELECT 1 FROM toppings WHERE id = :id AND usuario_id = :uid", id=t.id, uid=usuario_id
         )
         if not existe:
             continue
         conn.run(
-            "INSERT INTO receta_toppings (id_receta, id_topping) VALUES (:receta, :topping)",
-            receta=receta_id, topping=topping_id,
+            "INSERT INTO receta_toppings (id_receta, id_topping, precio_adicional) VALUES (:receta, :topping, :precio)",
+            receta=receta_id, topping=t.id, precio=t.precio_adicional,
         )
 
 

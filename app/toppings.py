@@ -3,7 +3,7 @@ from pg8000.exceptions import DatabaseError
 
 from app.auth import UserOut, get_current_user
 from app.database import get_connection
-from app.schemas import ToppingActivoIn, ToppingIn, ToppingOut
+from app.schemas import RecetaToppingOut, ToppingActivoIn, ToppingIn, ToppingOut
 
 router = APIRouter(prefix="/toppings", dependencies=[Depends(get_current_user)])
 
@@ -16,21 +16,22 @@ def _row_to_topping(row: dict) -> ToppingOut:
     return ToppingOut(id=row["id"], nombre=row["nombre"], activo=row["activo"])
 
 
-def toppings_por_receta(conn, receta_ids: list[int]) -> dict[int, list[ToppingOut]]:
+def toppings_por_receta(conn, receta_ids: list[int]) -> dict[int, list[RecetaToppingOut]]:
     """Toppings activos de varias recetas en una sola consulta, agrupados por receta_id —
-    para armar un catálogo sin pedirlos receta por receta (N+1)."""
-    agrupado: dict[int, list[ToppingOut]] = {rid: [] for rid in receta_ids}
+    para armar un catálogo sin pedirlos receta por receta (N+1). Incluye el valor adicional
+    que ese topping tiene específicamente en cada receta."""
+    agrupado: dict[int, list[RecetaToppingOut]] = {rid: [] for rid in receta_ids}
     if not receta_ids:
         return agrupado
     rows = conn.run(
-        "SELECT rt.id_receta, t.id, t.nombre, t.activo "
+        "SELECT rt.id_receta, t.id, t.nombre, t.activo, rt.precio_adicional "
         "FROM receta_toppings rt JOIN toppings t ON t.id = rt.id_topping "
         "WHERE rt.id_receta = ANY(:ids) AND t.activo = true "
         "ORDER BY t.nombre",
         ids=receta_ids,
     )
     for r in rows:
-        agrupado[r[0]].append(ToppingOut(id=r[1], nombre=r[2], activo=r[3]))
+        agrupado[r[0]].append(RecetaToppingOut(id=r[1], nombre=r[2], activo=r[3], precio_adicional=float(r[4])))
     return agrupado
 
 
