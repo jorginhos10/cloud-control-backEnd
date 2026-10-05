@@ -837,6 +837,7 @@ class DomicilioOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     motivo_cancelacion: str = ""
+    repartidor_id: Optional[int] = None
     items: list[DomicilioItemOut] = []
 
 
@@ -1193,7 +1194,7 @@ class PerdidaEstadisticasOut(BaseModel):
     top_insumo_cantidad: Optional[float] = None
 
 
-RolStaff = Literal["admin", "cocina", "inventario", "mesero"]
+RolStaff = Literal["admin", "cocina", "inventario", "mesero", "domiciliario"]
 
 
 class UsuarioStaffIn(BaseModel):

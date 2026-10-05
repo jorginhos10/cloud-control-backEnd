@@ -25,7 +25,7 @@ router = APIRouter(prefix="/domicilios", dependencies=[Depends(get_current_user)
 DOMICILIO_COLUMNS = [
     "id", "token_pedido", "nombre_cliente", "telefono", "direccion", "barrio", "notas",
     "tipo", "estado", "total", "valor_domicilio", "created_at", "updated_at", "metodo_pago",
-    "motivo_cancelacion",
+    "motivo_cancelacion", "repartidor_id",
 ]
 ITEM_COLUMNS = [
     "id", "receta_id", "nombre", "precio", "cantidad", "sabor_id", "sabor_nombre", "topping_id", "topping_nombre",
@@ -75,6 +75,7 @@ def _row_to_domicilio(conn, row: dict, items: list[DomicilioItemOut] | None = No
         notas=row["notas"] or "", tipo=row["tipo"], metodo_pago=row["metodo_pago"] or "", estado=row["estado"], total=float(row["total"]),
         valor_domicilio=float(row["valor_domicilio"]) if row["valor_domicilio"] is not None else None,
         created_at=row["created_at"], updated_at=row["updated_at"], motivo_cancelacion=row["motivo_cancelacion"] or "",
+        repartidor_id=row["repartidor_id"],
         items=items if items is not None else _get_items(conn, row["id"]),
     )
 
@@ -201,6 +202,73 @@ def list_domicilios(current_user: UserOut = Depends(get_current_user)):
         dicts = [dict(zip(DOMICILIO_COLUMNS, r)) for r in rows]
         items_por_domicilio = _get_items_por_domicilios(conn, [d["id"] for d in dicts])
         return [_row_to_domicilio(conn, d, items_por_domicilio[d["id"]]) for d in dicts]
+    finally:
+        conn.close()
+
+
+@router.get("/disponibles", response_model=list[DomicilioOut])
+def pedidos_disponibles(current_user: UserOut = Depends(get_current_user)):
+    """Pedidos listos para repartir que nadie ha reclamado todavía — lo que ve la app de
+    domiciliarios antes de tomar uno. Los "recoger" no entran aquí: no necesitan repartidor."""
+    conn = get_connection()
+    try:
+        rows = conn.run(
+            f"SELECT {', '.join(DOMICILIO_COLUMNS)} FROM domicilios "
+            "WHERE usuario_id = :uid AND tipo = 'domicilio' AND estado = 'listo' AND repartidor_id IS NULL "
+            "ORDER BY created_at ASC",
+            uid=current_user.tenant_id,
+        )
+        dicts = [dict(zip(DOMICILIO_COLUMNS, r)) for r in rows]
+        items_por_domicilio = _get_items_por_domicilios(conn, [d["id"] for d in dicts])
+        return [_row_to_domicilio(conn, d, items_por_domicilio[d["id"]]) for d in dicts]
+    finally:
+        conn.close()
+
+
+@router.get("/mis-pedidos", response_model=list[DomicilioOut])
+def mis_pedidos(current_user: UserOut = Depends(get_current_user)):
+    """Pedidos reclamados por el repartidor actual: los activos (listo/en_camino) más los que
+    ya entregó hoy, para que su lista del día no desaparezca apenas marca "entregado"."""
+    conn = get_connection()
+    try:
+        rows = conn.run(
+            f"SELECT {', '.join(DOMICILIO_COLUMNS)} FROM domicilios "
+            "WHERE usuario_id = :uid AND repartidor_id = :rid "
+            "AND (estado IN ('listo', 'en_camino') OR (estado = 'entregado' AND updated_at::date = CURRENT_DATE)) "
+            "ORDER BY created_at ASC",
+            uid=current_user.tenant_id, rid=current_user.id,
+        )
+        dicts = [dict(zip(DOMICILIO_COLUMNS, r)) for r in rows]
+        items_por_domicilio = _get_items_por_domicilios(conn, [d["id"] for d in dicts])
+        return [_row_to_domicilio(conn, d, items_por_domicilio[d["id"]]) for d in dicts]
+    finally:
+        conn.close()
+
+
+@router.post("/{domicilio_id}/reclamar", response_model=DomicilioOut)
+def reclamar_pedido(domicilio_id: int, current_user: UserOut = Depends(get_current_user)):
+    """El repartidor toma un pedido disponible. Usa una condición atómica (repartidor_id IS NULL)
+    para que, si dos repartidores lo tocan al mismo tiempo, solo el primero lo gane."""
+    conn = get_connection()
+    try:
+        rows = conn.run(
+            "UPDATE domicilios SET repartidor_id = :rid, updated_at = now() "
+            "WHERE id = :id AND usuario_id = :uid AND tipo = 'domicilio' AND estado = 'listo' "
+            "AND repartidor_id IS NULL "
+            "RETURNING id",
+            rid=current_user.id, id=domicilio_id, uid=current_user.tenant_id,
+        )
+        if not rows:
+            existe = conn.run(
+                "SELECT id FROM domicilios WHERE id = :id AND usuario_id = :uid",
+                id=domicilio_id, uid=current_user.tenant_id,
+            )
+            if not existe:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pedido no encontrado")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="Este pedido ya fue tomado por otro repartidor"
+            )
+        return _row_to_domicilio(conn, _get_domicilio_or_404(conn, current_user.tenant_id, domicilio_id))
     finally:
         conn.close()
 
@@ -372,6 +440,10 @@ def cambiar_estado(domicilio_id: int, payload: DomicilioEstadoIn, current_user: 
     conn = get_connection()
     try:
         dom = _get_domicilio_or_404(conn, current_user.tenant_id, domicilio_id)
+        # Un domiciliario solo puede mover el pedido que él mismo reclamó; el resto del staff
+        # (mesero, cocina, admin) sigue sin esta restricción, como siempre.
+        if current_user.rol == "domiciliario" and dom["repartidor_id"] != current_user.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Este pedido no está asignado a ti")
         _validar_transicion(dom["estado"], dom["tipo"], payload.estado)
 
         valor_domicilio = float(dom["valor_domicilio"]) if dom["valor_domicilio"] is not None else None

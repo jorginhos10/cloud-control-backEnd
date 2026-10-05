@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.activos_fijos import router as activos_fijos_router
 from app.apariencia_login import router as apariencia_login_router
+from app.aplicativos_publico import router as aplicativos_publico_router
 from app.auth import router as auth_router
 from app.chat_soporte import router as chat_soporte_router
 from app.clientes import router as clientes_router
@@ -58,6 +59,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(apariencia_login_router)
+app.include_router(aplicativos_publico_router)
 app.include_router(activos_fijos_router)
 app.include_router(chat_soporte_router)
 app.include_router(dashboard_router)
