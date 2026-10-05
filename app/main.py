@@ -38,6 +38,7 @@ from app.reportes import router as reportes_router
 from app.sabores import router as sabores_router
 from app.soporte import router as soporte_router
 from app.suscripcion import router as suscripcion_router
+from app.toppings import router as toppings_router
 from app.usuarios import router as usuarios_router
 from app.ventas import router as ventas_router
 from app.webhooks import router as webhooks_router
@@ -67,6 +68,7 @@ app.include_router(clientes_router)
 app.include_router(insumos_router)
 app.include_router(recetas_router)
 app.include_router(sabores_router)
+app.include_router(toppings_router)
 app.include_router(ingresos_router)
 app.include_router(menu_digital_router)
 app.include_router(negocios_router)

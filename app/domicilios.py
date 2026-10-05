@@ -27,7 +27,9 @@ DOMICILIO_COLUMNS = [
     "tipo", "estado", "total", "valor_domicilio", "created_at", "updated_at", "metodo_pago",
     "motivo_cancelacion",
 ]
-ITEM_COLUMNS = ["id", "receta_id", "nombre", "precio", "cantidad", "sabor_id", "sabor_nombre"]
+ITEM_COLUMNS = [
+    "id", "receta_id", "nombre", "precio", "cantidad", "sabor_id", "sabor_nombre", "topping_id", "topping_nombre",
+]
 CHAT_COLUMNS = ["id", "de", "mensaje", "leido", "created_at"]
 
 
@@ -38,7 +40,8 @@ def _get_items(conn, domicilio_id: int) -> list[DomicilioItemOut]:
     )
     return [
         DomicilioItemOut(
-            id=r[0], receta_id=r[1], nombre=r[2], precio=float(r[3]), cantidad=r[4], sabor_id=r[5], sabor_nombre=r[6]
+            id=r[0], receta_id=r[1], nombre=r[2], precio=float(r[3]), cantidad=r[4], sabor_id=r[5], sabor_nombre=r[6],
+            topping_id=r[7], topping_nombre=r[8],
         )
         for r in rows
     ]
@@ -59,7 +62,7 @@ def _get_items_por_domicilios(conn, domicilio_ids: list[int]) -> dict[int, list[
         agrupado[r[0]].append(
             DomicilioItemOut(
                 id=r[1], receta_id=r[2], nombre=r[3], precio=float(r[4]), cantidad=r[5],
-                sabor_id=r[6], sabor_nombre=r[7],
+                sabor_id=r[6], sabor_nombre=r[7], topping_id=r[8], topping_nombre=r[9],
             )
         )
     return agrupado
@@ -119,9 +122,22 @@ def _validar_items(conn, usuario_id: int, items_in) -> list[dict]:
                 continue
             sabor_nombre = sabor[0][0]
 
+        topping_id = getattr(item, "topping_id", None)
+        topping_nombre = None
+        if topping_id is not None:
+            topping = conn.run(
+                "SELECT t.nombre FROM receta_toppings rt JOIN toppings t ON t.id = rt.id_topping "
+                "WHERE rt.id_receta = :rid AND t.id = :tid",
+                rid=item.receta_id, tid=topping_id,
+            )
+            if not topping:
+                continue
+            topping_nombre = topping[0][0]
+
         resultado.append({
             "receta_id": item.receta_id, "nombre": nombre, "precio": precio, "cantidad": item.cantidad,
             "sabor_id": sabor_id, "sabor_nombre": sabor_nombre,
+            "topping_id": topping_id, "topping_nombre": topping_nombre,
         })
     return resultado
 
@@ -149,10 +165,12 @@ def crear_pedido(conn, usuario_id: int, payload: DomicilioPedidoIn, valor_domici
 
     for item in items:
         conn.run(
-            "INSERT INTO domicilio_items (domicilio_id, receta_id, nombre, precio, cantidad, sabor_id, sabor_nombre) "
-            "VALUES (:did, :rid, :nombre, :precio, :cant, :sid, :sabor_nombre)",
+            "INSERT INTO domicilio_items (domicilio_id, receta_id, nombre, precio, cantidad, sabor_id, sabor_nombre, "
+            "topping_id, topping_nombre) "
+            "VALUES (:did, :rid, :nombre, :precio, :cant, :sid, :sabor_nombre, :tid, :topping_nombre)",
             did=domicilio_id, rid=item["receta_id"], nombre=item["nombre"], precio=item["precio"],
             cant=item["cantidad"], sid=item["sabor_id"], sabor_nombre=item["sabor_nombre"],
+            tid=item["topping_id"], topping_nombre=item["topping_nombre"],
         )
 
     return domicilio_id
@@ -331,10 +349,12 @@ def modificar_pedido(domicilio_id: int, payload: DomicilioInternoIn, current_use
         conn.run("DELETE FROM domicilio_items WHERE domicilio_id = :id", id=dom["id"])
         for item in items:
             conn.run(
-                "INSERT INTO domicilio_items (domicilio_id, receta_id, nombre, precio, cantidad, sabor_id, sabor_nombre) "
-                "VALUES (:did, :rid, :nombre, :precio, :cant, :sid, :sabor_nombre)",
+                "INSERT INTO domicilio_items (domicilio_id, receta_id, nombre, precio, cantidad, sabor_id, sabor_nombre, "
+                "topping_id, topping_nombre) "
+                "VALUES (:did, :rid, :nombre, :precio, :cant, :sid, :sabor_nombre, :tid, :topping_nombre)",
                 did=dom["id"], rid=item["receta_id"], nombre=item["nombre"], precio=item["precio"],
                 cant=item["cantidad"], sid=item["sabor_id"], sabor_nombre=item["sabor_nombre"],
+                tid=item["topping_id"], topping_nombre=item["topping_nombre"],
             )
         # Aviso en el chat para que el cliente vea que el negocio ajustó su pedido.
         conn.run(

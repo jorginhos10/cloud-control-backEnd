@@ -161,6 +161,7 @@ class VentaItemIn(BaseModel):
     receta_id: int
     cantidad: int = Field(ge=1, default=1)
     sabor_id: Optional[int] = None
+    topping_id: Optional[int] = None
 
 
 class VentaItemCantidadIn(BaseModel):
@@ -175,6 +176,7 @@ class VentaItemOut(BaseModel):
     precio_unitario: float
     subtotal: float
     sabor_nombre: Optional[str] = None
+    topping_nombre: Optional[str] = None
 
 
 class VentaOut(BaseModel):
@@ -265,6 +267,20 @@ class SaborOut(BaseModel):
     activo: bool
 
 
+class ToppingIn(BaseModel):
+    nombre: str = Field(min_length=1, max_length=80)
+
+
+class ToppingActivoIn(BaseModel):
+    activo: bool
+
+
+class ToppingOut(BaseModel):
+    id: int
+    nombre: str
+    activo: bool
+
+
 class CatalogoItemOut(BaseModel):
     id: int
     nombre: str
@@ -273,6 +289,7 @@ class CatalogoItemOut(BaseModel):
     disponible: Optional[int] = None
     imagen_url: Optional[str] = None
     sabores: list[SaborOut] = []
+    toppings: list[ToppingOut] = []
 
 
 class NegocioPublicoOut(BaseModel):
@@ -288,6 +305,7 @@ class CocinaItemOut(BaseModel):
     cantidad: int
     categoria: str
     sabor_nombre: Optional[str] = None
+    topping_nombre: Optional[str] = None
 
 
 class CocinaOrdenOut(BaseModel):
@@ -488,6 +506,7 @@ class RecetaIn(BaseModel):
     imagen_url: Optional[str] = None
     ingredientes: list[RecetaIngredienteIn] = []
     sabores: list[int] = []
+    toppings: list[int] = []
 
 
 class RecetaActivoIn(BaseModel):
@@ -515,6 +534,7 @@ class RecetaOut(BaseModel):
     imagen_url: Optional[str] = None
     ingredientes: list[RecetaIngredienteOut] = []
     sabores: list[SaborOut] = []
+    toppings: list[ToppingOut] = []
     costo_total: float
     margen: float
 
@@ -699,6 +719,7 @@ class DomicilioItemIn(BaseModel):
     receta_id: int
     cantidad: int = Field(ge=1, default=1)
     sabor_id: Optional[int] = None
+    topping_id: Optional[int] = None
 
 
 class DomicilioPedidoIn(BaseModel):
@@ -784,6 +805,8 @@ class DomicilioItemOut(BaseModel):
     cantidad: int
     sabor_id: Optional[int] = None
     sabor_nombre: Optional[str] = None
+    topping_id: Optional[int] = None
+    topping_nombre: Optional[str] = None
 
 
 class DomicilioOut(BaseModel):
