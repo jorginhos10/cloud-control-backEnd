@@ -208,14 +208,17 @@ def list_domicilios(current_user: UserOut = Depends(get_current_user)):
 
 @router.get("/disponibles", response_model=list[DomicilioOut])
 def pedidos_disponibles(current_user: UserOut = Depends(get_current_user)):
-    """Pedidos listos para repartir que nadie ha reclamado todavía — lo que ve la app de
-    domiciliarios antes de tomar uno. Los "recoger" no entran aquí: no necesitan repartidor."""
+    """Pedidos sin reclamar que la app de domiciliarios puede mostrar: los "listo" (ya se pueden
+    tomar) y los "preparacion" (el negocio ya los aprobó, el repartidor los ve venir pero todavía
+    no los puede reclamar — eso lo sigue exigiendo /reclamar). Los "recoger" no entran aquí: no
+    necesitan repartidor."""
     conn = get_connection()
     try:
         rows = conn.run(
             f"SELECT {', '.join(DOMICILIO_COLUMNS)} FROM domicilios "
-            "WHERE usuario_id = :uid AND tipo = 'domicilio' AND estado = 'listo' AND repartidor_id IS NULL "
-            "ORDER BY created_at ASC",
+            "WHERE usuario_id = :uid AND tipo = 'domicilio' AND estado IN ('listo', 'preparacion') "
+            "AND repartidor_id IS NULL "
+            "ORDER BY (estado = 'listo') DESC, created_at ASC",
             uid=current_user.tenant_id,
         )
         dicts = [dict(zip(DOMICILIO_COLUMNS, r)) for r in rows]

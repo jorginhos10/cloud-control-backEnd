@@ -47,7 +47,7 @@ SALON_SELECT = """
         COALESCE(item_counts.items_count, 0) AS items_count, v.fecha_apertura AS orden_inicio
     FROM mesas
     JOIN zonas ON zonas.id = mesas.zona_id
-    LEFT JOIN ventas v ON v.mesa_id = mesas.id AND v.estado IN ('abierta', 'en_preparacion', 'lista')
+    LEFT JOIN ventas v ON v.mesa_id = mesas.id AND v.estado IN ('abierta', 'en_preparacion', 'lista', 'entregada')
     LEFT JOIN (
         SELECT venta_id, COALESCE(SUM(cantidad), 0) AS items_count
         FROM venta_items
@@ -99,7 +99,7 @@ def salon_estadisticas(current_user: UserOut = Depends(get_current_user)):
         )[0]
         ingresos = conn.run(
             "SELECT COALESCE(SUM(total), 0) FROM ventas "
-            "WHERE usuario_id = :uid AND estado IN ('abierta', 'en_preparacion', 'lista')",
+            "WHERE usuario_id = :uid AND estado IN ('abierta', 'en_preparacion', 'lista', 'entregada')",
             uid=current_user.tenant_id,
         )[0][0]
         return SalonEstadisticasOut(
@@ -499,7 +499,7 @@ def _liberar_mesa_si_corresponde(conn, mesa_id: int | None) -> None:
     if mesa_id is None:
         return
     activas = conn.run(
-        "SELECT 1 FROM ventas WHERE mesa_id = :mid AND estado IN ('abierta', 'en_preparacion', 'lista')",
+        "SELECT 1 FROM ventas WHERE mesa_id = :mid AND estado IN ('abierta', 'en_preparacion', 'lista', 'entregada')",
         mid=mesa_id,
     )
     if not activas:
@@ -651,14 +651,14 @@ def cambiar_de_mesa(mesa_id: int, payload: MesaCambioIn, current_user: UserOut =
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="La mesa destino no está libre")
         activas_destino = conn.run(
             "SELECT 1 FROM ventas WHERE mesa_id = :mid AND usuario_id = :uid "
-            "AND estado IN ('abierta','en_preparacion','lista')",
+            "AND estado IN ('abierta','en_preparacion','lista','entregada')",
             mid=payload.destino_id, uid=uid,
         )
         if activas_destino:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="La mesa destino ya tiene una orden abierta")
         movidas = conn.run(
             "UPDATE ventas SET mesa_id = :dest WHERE mesa_id = :orig AND usuario_id = :uid "
-            "AND estado IN ('abierta','en_preparacion','lista') RETURNING id",
+            "AND estado IN ('abierta','en_preparacion','lista','entregada') RETURNING id",
             dest=payload.destino_id, orig=mesa_id, uid=uid,
         )
         if not movidas:
