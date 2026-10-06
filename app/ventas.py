@@ -237,7 +237,8 @@ COCINA_ORDENES_SELECT = """
 """
 
 COCINA_ITEMS_SELECT = """
-    SELECT vi.id, vi.nombre, vi.cantidad, COALESCE(rc.label, 'Otro') AS categoria, vi.sabor_nombre, vi.topping_nombre
+    SELECT vi.id, vi.nombre, vi.cantidad, COALESCE(rc.label, 'Otro') AS categoria, vi.sabor_nombre, vi.topping_nombre,
+           r.categoria_id
     FROM venta_items vi
     LEFT JOIN recetas r ON r.id = vi.receta_id
     LEFT JOIN receta_categorias rc ON rc.id = r.categoria_id
@@ -258,7 +259,8 @@ DOMICILIO_ORDENES_SELECT = """
 """
 
 DOMICILIO_ITEMS_SELECT = """
-    SELECT di.id, di.nombre, di.cantidad, COALESCE(rc.label, 'Otro') AS categoria, di.sabor_nombre, di.topping_nombre
+    SELECT di.id, di.nombre, di.cantidad, COALESCE(rc.label, 'Otro') AS categoria, di.sabor_nombre, di.topping_nombre,
+           r.categoria_id
     FROM domicilio_items di
     LEFT JOIN recetas r ON r.id = di.receta_id
     LEFT JOIN receta_categorias rc ON rc.id = r.categoria_id
@@ -271,30 +273,44 @@ DOMICILIO_ITEMS_SELECT = """
 _ESTADO_DOMICILIO_A_COCINA = {"preparacion": "en_preparacion", "listo": "lista", "cancelado": "cancelada"}
 
 
-def _cocina_ordenes_de_ventas(conn, uid: int) -> list[CocinaOrdenOut]:
+def _filtrar_items_por_categoria(item_rows, categoria_ids: set[int] | None) -> list[CocinaItemOut]:
+    """Si el cocinero tiene categorías asignadas, deja afuera los ítems de otras categorías —
+    un ítem sin receta (categoria_id NULL, p. ej. un cargo suelto) nunca le aparece a nadie con
+    categorías asignadas, ya que no hay forma de saber a quién le toca."""
+    items = item_rows if categoria_ids is None else [i for i in item_rows if i[6] in categoria_ids]
+    return [CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3], sabor_nombre=i[4], topping_nombre=i[5]) for i in items]
+
+
+def _cocina_ordenes_de_ventas(conn, uid: int, categoria_ids: set[int] | None) -> list[CocinaOrdenOut]:
     rows = conn.run(COCINA_ORDENES_SELECT, uid=uid)
     ordenes = []
     for r in rows:
         item_rows = conn.run(COCINA_ITEMS_SELECT, id=r[0])
+        items = _filtrar_items_por_categoria(item_rows, categoria_ids)
+        if categoria_ids is not None and not items:
+            continue
         ordenes.append(
             CocinaOrdenOut(
                 id=r[0], tipo=r[1], estado=r[2], notas=r[3], fecha_apertura=r[4],
                 mesa_numero=r[5], mesa_nombre=r[6], mesa_zona=r[7],
-                items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3], sabor_nombre=i[4], topping_nombre=i[5]) for i in item_rows],
+                items=items,
             )
         )
     return ordenes
 
 
-def _cocina_ordenes_de_domicilios(conn, uid: int) -> list[CocinaOrdenOut]:
+def _cocina_ordenes_de_domicilios(conn, uid: int, categoria_ids: set[int] | None) -> list[CocinaOrdenOut]:
     rows = conn.run(DOMICILIO_ORDENES_SELECT, uid=uid)
     ordenes = []
     for r in rows:
         item_rows = conn.run(DOMICILIO_ITEMS_SELECT, id=r[0])
+        items = _filtrar_items_por_categoria(item_rows, categoria_ids)
+        if categoria_ids is not None and not items:
+            continue
         ordenes.append(
             CocinaOrdenOut(
                 id=r[0], tipo=r[1], estado=_ESTADO_DOMICILIO_A_COCINA[r[2]], notas=r[3] or "", fecha_apertura=r[4],
-                items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3], sabor_nombre=i[4], topping_nombre=i[5]) for i in item_rows],
+                items=items,
                 origen="domicilio", cliente_nombre=r[5], direccion=r[6],
             )
         )
@@ -308,12 +324,23 @@ def _orden_sort_key(orden: CocinaOrdenOut):
     return fecha.replace(tzinfo=None) if fecha.tzinfo else fecha
 
 
+def _categorias_del_cocinero(conn, current_user: UserOut) -> set[int] | None:
+    """None = ve todo (no es cocina, o es cocina pero no tiene categorías asignadas — se queda
+    con el comportamiento de siempre). Un set (aunque esté vacío) = filtrar a solo esas."""
+    if current_user.rol != "cocina":
+        return None
+    rows = conn.run("SELECT categoria_id FROM usuario_categorias WHERE usuario_id = :id", id=current_user.id)
+    ids = {r[0] for r in rows}
+    return ids or None
+
+
 @router.get("/cocina/ordenes", response_model=list[CocinaOrdenOut])
 def cocina_ordenes(current_user: UserOut = Depends(get_current_user)):
     conn = get_connection()
     try:
-        ordenes = _cocina_ordenes_de_ventas(conn, current_user.tenant_id) + _cocina_ordenes_de_domicilios(
-            conn, current_user.tenant_id
+        categoria_ids = _categorias_del_cocinero(conn, current_user)
+        ordenes = _cocina_ordenes_de_ventas(conn, current_user.tenant_id, categoria_ids) + _cocina_ordenes_de_domicilios(
+            conn, current_user.tenant_id, categoria_ids
         )
         ordenes.sort(key=_orden_sort_key)
         return ordenes
@@ -347,26 +374,33 @@ _ESTADO_DOMICILIO_A_HISTORIAL = {"entregado": "cerrada", "cancelado": "cancelada
 def cocina_historial(current_user: UserOut = Depends(get_current_user)):
     conn = get_connection()
     try:
+        categoria_ids = _categorias_del_cocinero(conn, current_user)
         hoy = date.today()
         rows = conn.run(COCINA_HISTORIAL_SELECT, uid=current_user.tenant_id, hoy=hoy)
         ordenes = []
         for r in rows:
             item_rows = conn.run(COCINA_ITEMS_SELECT, id=r[0])
+            items = _filtrar_items_por_categoria(item_rows, categoria_ids)
+            if categoria_ids is not None and not items:
+                continue
             ordenes.append(
                 CocinaOrdenOut(
                     id=r[0], tipo=r[1], estado=r[2], notas=r[3], fecha_apertura=r[4],
                     mesa_numero=r[5], mesa_nombre=r[6], mesa_zona=r[7],
-                    items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3], sabor_nombre=i[4], topping_nombre=i[5]) for i in item_rows],
+                    items=items,
                 )
             )
 
         dom_rows = conn.run(DOMICILIO_HISTORIAL_SELECT, uid=current_user.tenant_id, hoy=hoy)
         for r in dom_rows:
             item_rows = conn.run(DOMICILIO_ITEMS_SELECT, id=r[0])
+            items = _filtrar_items_por_categoria(item_rows, categoria_ids)
+            if categoria_ids is not None and not items:
+                continue
             ordenes.append(
                 CocinaOrdenOut(
                     id=r[0], tipo=r[1], estado=_ESTADO_DOMICILIO_A_HISTORIAL[r[2]], notas=r[3] or "", fecha_apertura=r[4],
-                    items=[CocinaItemOut(id=i[0], nombre=i[1], cantidad=i[2], categoria=i[3], sabor_nombre=i[4], topping_nombre=i[5]) for i in item_rows],
+                    items=items,
                     origen="domicilio", cliente_nombre=r[5], direccion=r[6],
                 )
             )

@@ -22,12 +22,35 @@ STAFF_COLUMNS = [
 ]
 
 
-def _row_to_staff(row: dict) -> UsuarioStaffOut:
+def _row_to_staff(row: dict, categoria_ids: list[int] | None = None) -> UsuarioStaffOut:
     return UsuarioStaffOut(
         id=row["id"], username=row["username"], nombre=row["nombre"], apellido=row["apellido"],
         telefono=row["telefono"], email=row["email"], numero_documento=row["numero_documento"],
         rol=row["rol"], activo=row["activo"], propietario=row["propietario"], ultimo_login=row["ultimo_login"],
+        categoria_ids=categoria_ids or [],
     )
+
+
+def _categoria_ids_de(conn, usuario_id: int) -> list[int]:
+    rows = conn.run("SELECT categoria_id FROM usuario_categorias WHERE usuario_id = :id", id=usuario_id)
+    return [r[0] for r in rows]
+
+
+def _set_categoria_ids(conn, tenant_id: int, usuario_id: int, categoria_ids: list[int]) -> None:
+    """Reemplaza las categorías asignadas, validando que cada una sea del mismo negocio —
+    así una petición manipulada no puede engancharse a la categoría de otro tenant."""
+    conn.run("DELETE FROM usuario_categorias WHERE usuario_id = :id", id=usuario_id)
+    for categoria_id in set(categoria_ids):
+        existe = conn.run(
+            "SELECT 1 FROM receta_categorias WHERE id = :id AND usuario_id = :uid",
+            id=categoria_id, uid=tenant_id,
+        )
+        if not existe:
+            continue
+        conn.run(
+            "INSERT INTO usuario_categorias (usuario_id, categoria_id) VALUES (:uid, :cid)",
+            uid=usuario_id, cid=categoria_id,
+        )
 
 
 def _require_propietario(current_user: UserOut) -> None:
@@ -60,7 +83,8 @@ def list_usuarios(current_user: UserOut = Depends(get_current_user), tenant_id: 
             "WHERE id = :tid OR propietario_id = :tid ORDER BY propietario DESC, nombre",
             tid=tenant_id,
         )
-        return [_row_to_staff(dict(zip(STAFF_COLUMNS, r))) for r in rows]
+        staff = [dict(zip(STAFF_COLUMNS, r)) for r in rows]
+        return [_row_to_staff(s, _categoria_ids_de(conn, s["id"])) for s in staff]
     finally:
         conn.close()
 
@@ -95,7 +119,9 @@ def create_usuario(
                     status_code=status.HTTP_409_CONFLICT, detail="Ese usuario o correo ya está en uso"
                 )
             raise
-        return _row_to_staff(dict(zip(STAFF_COLUMNS, rows[0])))
+        nuevo = dict(zip(STAFF_COLUMNS, rows[0]))
+        _set_categoria_ids(conn, tenant_id, nuevo["id"], payload.categoria_ids)
+        return _row_to_staff(nuevo, _categoria_ids_de(conn, nuevo["id"]))
     finally:
         conn.close()
 
@@ -121,7 +147,8 @@ def update_usuario(
             telefono=payload.telefono.strip(), numero_documento=payload.numero_documento.strip(),
             rol=payload.rol, activo=payload.activo,
         )
-        return _row_to_staff(dict(zip(STAFF_COLUMNS, rows[0])))
+        _set_categoria_ids(conn, tenant_id, staff_id, payload.categoria_ids)
+        return _row_to_staff(dict(zip(STAFF_COLUMNS, rows[0])), _categoria_ids_de(conn, staff_id))
     finally:
         conn.close()
 
@@ -148,7 +175,7 @@ def toggle_activo(
         # Si se desactivó, que no le sirvan las peticiones que ya tenía en camino con la sesión en caché.
         if not payload.activo:
             _invalidar_cache_usuario(staff_id)
-        return _row_to_staff(dict(zip(STAFF_COLUMNS, rows[0])))
+        return _row_to_staff(dict(zip(STAFF_COLUMNS, rows[0])), _categoria_ids_de(conn, staff_id))
     finally:
         conn.close()
 

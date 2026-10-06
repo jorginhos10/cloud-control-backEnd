@@ -1213,6 +1213,9 @@ class UsuarioStaffIn(BaseModel):
     numero_documento: str = Field(min_length=1, max_length=30)
     rol: RolStaff = "mesero"
     activo: bool = True
+    # Solo aplica con rol "cocina": si viene vacío, ese cocinero sigue viendo todas las
+    # categorías (comportamiento de siempre); si trae IDs, Cocina le filtra solo esas.
+    categoria_ids: list[int] = []
 
 
 class UsuarioStaffUpdateIn(BaseModel):
@@ -1222,6 +1225,7 @@ class UsuarioStaffUpdateIn(BaseModel):
     numero_documento: str = Field(min_length=1, max_length=30)
     rol: RolStaff
     activo: bool
+    categoria_ids: list[int] = []
 
 
 class UsuarioActivoIn(BaseModel):
@@ -1244,6 +1248,7 @@ class UsuarioStaffOut(BaseModel):
     activo: bool
     propietario: bool
     ultimo_login: Optional[datetime] = None
+    categoria_ids: list[int] = []
 
 
 TamanoPapel = Literal["58mm", "80mm", "carta"]
