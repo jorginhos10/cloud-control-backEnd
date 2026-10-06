@@ -838,7 +838,15 @@ class DomicilioOut(BaseModel):
     updated_at: datetime
     motivo_cancelacion: str = ""
     repartidor_id: Optional[int] = None
+    repartidor_lat: Optional[float] = None
+    repartidor_lng: Optional[float] = None
+    repartidor_ubicacion_at: Optional[datetime] = None
     items: list[DomicilioItemOut] = []
+
+
+class DomicilioUbicacionIn(BaseModel):
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
 
 
 class DomicilioEstadisticasOut(BaseModel):

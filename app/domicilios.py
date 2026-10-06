@@ -16,6 +16,7 @@ from app.schemas import (
     DomicilioOut,
     DomicilioPedidoIn,
     DomicilioTokenOut,
+    DomicilioUbicacionIn,
     DomicilioUbicacionOut,
 )
 from app.tarifas_domicilio import cargar_config, geocodificar
@@ -25,7 +26,7 @@ router = APIRouter(prefix="/domicilios", dependencies=[Depends(get_current_user)
 DOMICILIO_COLUMNS = [
     "id", "token_pedido", "nombre_cliente", "telefono", "direccion", "barrio", "notas",
     "tipo", "estado", "total", "valor_domicilio", "created_at", "updated_at", "metodo_pago",
-    "motivo_cancelacion", "repartidor_id",
+    "motivo_cancelacion", "repartidor_id", "repartidor_lat", "repartidor_lng", "repartidor_ubicacion_at",
 ]
 ITEM_COLUMNS = [
     "id", "receta_id", "nombre", "precio", "cantidad", "sabor_id", "sabor_nombre", "topping_id", "topping_nombre",
@@ -76,6 +77,9 @@ def _row_to_domicilio(conn, row: dict, items: list[DomicilioItemOut] | None = No
         valor_domicilio=float(row["valor_domicilio"]) if row["valor_domicilio"] is not None else None,
         created_at=row["created_at"], updated_at=row["updated_at"], motivo_cancelacion=row["motivo_cancelacion"] or "",
         repartidor_id=row["repartidor_id"],
+        repartidor_lat=row["repartidor_lat"],
+        repartidor_lng=row["repartidor_lng"],
+        repartidor_ubicacion_at=row["repartidor_ubicacion_at"],
         items=items if items is not None else _get_items(conn, row["id"]),
     )
 
@@ -481,6 +485,29 @@ def cambiar_estado(domicilio_id: int, payload: DomicilioEstadoIn, current_user: 
                 id=domicilio_id, msg=f"Pedido cancelado: {motivo_cancelacion}",
             )
         return _row_to_domicilio(conn, _get_domicilio_or_404(conn, current_user.tenant_id, domicilio_id))
+    finally:
+        conn.close()
+
+
+@router.patch("/{domicilio_id}/ubicacion", status_code=status.HTTP_204_NO_CONTENT)
+def actualizar_ubicacion(
+    domicilio_id: int, payload: DomicilioUbicacionIn, current_user: UserOut = Depends(get_current_user)
+):
+    """Ping de posición de la app de domiciliario mientras va "en_camino" — el cliente lo ve
+    en tiempo (case)real en el mapa de seguimiento público. Se llama muy seguido (cada pocos
+    segundos), así que es intencionalmente la operación más liviana del router: un solo UPDATE,
+    sin volver a construir el DomicilioOut completo."""
+    if current_user.rol != "domiciliario":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Solo un domiciliario puede enviar su ubicación")
+    conn = get_connection()
+    try:
+        rows = conn.run(
+            "UPDATE domicilios SET repartidor_lat = :lat, repartidor_lng = :lng, repartidor_ubicacion_at = now() "
+            "WHERE id = :id AND usuario_id = :uid AND repartidor_id = :rid RETURNING id",
+            lat=payload.lat, lng=payload.lng, id=domicilio_id, uid=current_user.tenant_id, rid=current_user.id,
+        )
+        if not rows:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pedido no encontrado")
     finally:
         conn.close()
 
