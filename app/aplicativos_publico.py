@@ -6,7 +6,7 @@ from app.database import get_superadmin_connection
 router = APIRouter(prefix="/aplicativos", tags=["aplicativos"])
 
 # Los mismos 4 aplicativos que lista la página Aplicativos del front del cliente.
-APP_KEYS = ("domiciliario", "mesero", "escritorio", "driver")
+APP_KEYS = ("domiciliario", "cocina", "escritorio", "driver")
 
 
 class IconosAplicativosOut(BaseModel):
