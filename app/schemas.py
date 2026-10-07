@@ -1126,10 +1126,17 @@ class ConfirmarTransaccionIn(BaseModel):
     transaction_id: str
 
 
+class NequiPagoOut(BaseModel):
+    codigo: str
+    monto: float
+    llave_nequi: str
+
+
 class SuscripcionPagoOut(BaseModel):
     estado: str
     plan: PlanPublicoOut
     wompi: Optional[WompiCheckoutOut] = None
+    nequi: Optional[NequiPagoOut] = None
 
 
 class CuponValidarIn(BaseModel):

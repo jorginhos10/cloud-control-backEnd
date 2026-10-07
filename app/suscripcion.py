@@ -1,4 +1,5 @@
 import os
+import secrets
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -9,6 +10,7 @@ from app.database import get_connection, get_superadmin_connection
 from app.modulos import modulos_de_cuenta
 from app.schemas import (
     ConfirmarTransaccionIn,
+    NequiPagoOut,
     PlanPublicoOut,
     SeleccionarPlanIn,
     SuscripcionPagoOut,
@@ -18,6 +20,9 @@ from app.schemas import (
 router = APIRouter(prefix="/suscripcion", dependencies=[Depends(get_current_user)])
 
 REFERENCE_PREFIX = "sus-"
+NEQUI_REFERENCE_PREFIX = "nqi-"
+NEQUI_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # sin 0,1,I,O para evitar confusiones
+ESTADO_PENDIENTE_NEQUI = "pendiente_verificacion_nequi"
 
 
 def _plan_actual_id(current_user: UserOut) -> int | None:
@@ -77,6 +82,20 @@ def _plan_publico_out(r, actual: bool) -> PlanPublicoOut:
         id=r[0], nombre=r[1], slug=r[2], descripcion=r[3], precio=float(r[4]),
         periodo=r[5], color=r[6], caracteristicas=r[7], destacado=r[8], actual=actual,
     )
+
+
+def _generar_codigo_nequi(conn) -> str:
+    """Código corto (6 caracteres) que el cliente escribe como referencia al pagar desde su app
+    Nequi, para que el SuperAdmin sepa a qué tenant/plan corresponde ese pago al confirmarlo."""
+    for _ in range(20):
+        codigo = "".join(secrets.choice(NEQUI_CODE_ALPHABET) for _ in range(6))
+        existe = conn.run(
+            "SELECT 1 FROM suscripcion_pagos WHERE wompi_reference = :ref",
+            ref=f"{NEQUI_REFERENCE_PREFIX}{codigo}",
+        )
+        if not existe:
+            return codigo
+    raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="No se pudo generar un código único")
 
 
 def _aplicar_plan(tenant_id: int, plan_id: int) -> None:
@@ -222,3 +241,78 @@ def confirmar_pago(payload: ConfirmarTransaccionIn, current_user: UserOut = Depe
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan no encontrado")
 
     return SuscripcionPagoOut(estado=nuevo_estado, plan=_plan_publico_out(r, actual=(nuevo_estado == "pagado")))
+
+
+@router.post("/nequi/solicitar", response_model=SuscripcionPagoOut)
+def solicitar_pago_nequi(payload: SeleccionarPlanIn, current_user: UserOut = Depends(get_current_user)):
+    """No hay integración directa con la API de Nequi: el cliente paga manualmente desde su app
+    a la llave del negocio, usando este código corto como referencia/mensaje del pago. Queda
+    'pendiente_verificacion_nequi' hasta que el SuperAdmin confirme a mano que llegó la plata."""
+    llave = os.environ.get("NEQUI_LLAVE")
+    if not llave:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="El pago con Nequi no está disponible todavía")
+
+    try:
+        sconn = get_superadmin_connection()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="No se pudo verificar el plan")
+    try:
+        r = _fetch_plan_disponible(sconn, payload.plan_id, current_user.tenant_id)
+        if not r:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ese plan no está disponible")
+        precio = float(r[4])
+    finally:
+        sconn.close()
+
+    if precio <= 0:
+        _aplicar_plan(current_user.tenant_id, payload.plan_id)
+        return SuscripcionPagoOut(estado="pagado", plan=_plan_publico_out(r, actual=True))
+
+    conn = get_connection()
+    try:
+        codigo = _generar_codigo_nequi(conn)
+        conn.run(
+            "INSERT INTO suscripcion_pagos (usuario_id, plan_id, monto, wompi_reference, estado, metodo) "
+            "VALUES (:uid, :pid, :monto, :ref, :estado, 'nequi')",
+            uid=current_user.tenant_id, pid=payload.plan_id, monto=precio,
+            ref=f"{NEQUI_REFERENCE_PREFIX}{codigo}", estado=ESTADO_PENDIENTE_NEQUI,
+        )
+    finally:
+        conn.close()
+
+    return SuscripcionPagoOut(
+        estado=ESTADO_PENDIENTE_NEQUI,
+        plan=_plan_publico_out(r, actual=False),
+        nequi=NequiPagoOut(codigo=codigo, monto=precio, llave_nequi=llave),
+    )
+
+
+@router.get("/nequi/estado", response_model=SuscripcionPagoOut)
+def estado_pago_nequi(current_user: UserOut = Depends(get_current_user)):
+    """El último pago por Nequi de este tenant — para que el cliente vea en vivo cuando el
+    SuperAdmin lo confirme, sondeando esta ruta mientras espera."""
+    conn = get_connection()
+    try:
+        rows = conn.run(
+            "SELECT plan_id, estado FROM suscripcion_pagos WHERE usuario_id = :uid AND metodo = 'nequi' "
+            "ORDER BY created_at DESC LIMIT 1",
+            uid=current_user.tenant_id,
+        )
+    finally:
+        conn.close()
+    if not rows:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No hay ningún pago por Nequi")
+    plan_id, estado = rows[0]
+
+    try:
+        sconn = get_superadmin_connection()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="No se pudo verificar el plan")
+    try:
+        r = _fetch_plan_by_id(sconn, plan_id)
+    finally:
+        sconn.close()
+    if not r:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan no encontrado")
+
+    return SuscripcionPagoOut(estado=estado, plan=_plan_publico_out(r, actual=(estado == "pagado")))
