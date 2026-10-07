@@ -40,7 +40,7 @@ INGREDIENTE_SELECT = """
 """
 
 SABOR_DE_RECETA_SELECT = """
-    SELECT s.id, s.nombre, s.activo, rs.precio_adicional
+    SELECT s.id, s.nombre, s.activo, rs.precio_adicional, s.foto_url
     FROM receta_sabores rs
     JOIN sabores s ON s.id = rs.id_sabor
     WHERE rs.id_receta = :id_receta
@@ -171,7 +171,10 @@ def _get_ingredientes(conn, receta_id: int) -> list[RecetaIngredienteOut]:
 
 def _get_sabores(conn, receta_id: int) -> list[RecetaSaborOut]:
     rows = conn.run(SABOR_DE_RECETA_SELECT, id_receta=receta_id)
-    return [RecetaSaborOut(id=r[0], nombre=r[1], activo=r[2], precio_adicional=float(r[3])) for r in rows]
+    return [
+        RecetaSaborOut(id=r[0], nombre=r[1], activo=r[2], precio_adicional=float(r[3]), foto_url=r[4])
+        for r in rows
+    ]
 
 
 def _get_toppings(conn, receta_id: int) -> list[RecetaToppingOut]:
@@ -212,13 +215,15 @@ def _sabores_por_receta_admin(conn, receta_ids: list[int]) -> dict[int, list[Rec
     if not receta_ids:
         return agrupado
     rows = conn.run(
-        "SELECT rs.id_receta, s.id, s.nombre, s.activo, rs.precio_adicional "
+        "SELECT rs.id_receta, s.id, s.nombre, s.activo, rs.precio_adicional, s.foto_url "
         "FROM receta_sabores rs JOIN sabores s ON s.id = rs.id_sabor "
         "WHERE rs.id_receta = ANY(:ids) ORDER BY s.nombre",
         ids=receta_ids,
     )
     for r in rows:
-        agrupado[r[0]].append(RecetaSaborOut(id=r[1], nombre=r[2], activo=r[3], precio_adicional=float(r[4])))
+        agrupado[r[0]].append(
+            RecetaSaborOut(id=r[1], nombre=r[2], activo=r[3], precio_adicional=float(r[4]), foto_url=r[5])
+        )
     return agrupado
 
 

@@ -255,6 +255,7 @@ class VentaListadoOut(BaseModel):
 
 class SaborIn(BaseModel):
     nombre: str = Field(min_length=1, max_length=80)
+    foto_url: Optional[str] = None
 
 
 class SaborActivoIn(BaseModel):
@@ -265,6 +266,7 @@ class SaborOut(BaseModel):
     id: int
     nombre: str
     activo: bool
+    foto_url: Optional[str] = None
 
 
 class RecetaSaborIn(BaseModel):
@@ -277,6 +279,7 @@ class RecetaSaborOut(BaseModel):
     nombre: str
     activo: bool
     precio_adicional: float
+    foto_url: Optional[str] = None
 
 
 class RecetaSaboresUpdateIn(BaseModel):
