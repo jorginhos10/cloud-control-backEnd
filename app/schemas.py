@@ -565,6 +565,12 @@ class RecetaActivoIn(BaseModel):
     activo: bool
 
 
+class RecetaLimitesIn(BaseModel):
+    """None = sin límite (puede elegir todos los que tenga el producto)."""
+    max_sabores: Optional[int] = Field(default=None, ge=1)
+    max_toppings: Optional[int] = Field(default=None, ge=1)
+
+
 class RecetaIngredienteOut(BaseModel):
     id_insumo: int
     insumo_nombre: str
@@ -589,6 +595,8 @@ class RecetaOut(BaseModel):
     toppings: list[RecetaToppingOut] = []
     costo_total: float
     margen: float
+    max_sabores: Optional[int] = 1
+    max_toppings: Optional[int] = 1
 
 
 class RecetaEstadisticasOut(BaseModel):

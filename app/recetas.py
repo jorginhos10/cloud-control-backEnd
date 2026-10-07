@@ -14,6 +14,7 @@ from app.schemas import (
     RecetaEstadisticasOut,
     RecetaIn,
     RecetaIngredienteOut,
+    RecetaLimitesIn,
     RecetaOut,
     RecetaSaborOut,
     RecetaSaboresUpdateIn,
@@ -29,6 +30,7 @@ CATEGORIA_COLUMNS = ["id", "key", "label"]
 RECETA_COLUMNS = [
     "id", "nombre", "descripcion", "categoria_key", "tiempo_preparacion",
     "porciones", "precio_venta", "activo", "created_at", "imagen_url", "imagen_thumb_url",
+    "max_sabores", "max_toppings",
 ]
 
 INGREDIENTE_SELECT = """
@@ -144,7 +146,7 @@ def _receta_select(where: str = "") -> str:
     return (
         "SELECT recetas.id, recetas.nombre, recetas.descripcion, receta_categorias.key AS categoria_key, "
         "recetas.tiempo_preparacion, recetas.porciones, recetas.precio_venta, recetas.activo, recetas.created_at, "
-        "recetas.imagen_url, recetas.imagen_thumb_url "
+        "recetas.imagen_url, recetas.imagen_thumb_url, recetas.max_sabores, recetas.max_toppings "
         "FROM recetas JOIN receta_categorias ON receta_categorias.id = recetas.categoria_id " + where
     )
 
@@ -263,6 +265,7 @@ def _build_receta_out(
         created_at=row["created_at"], imagen_url=row["imagen_url"],
         ingredientes=ingredientes, sabores=sabores, toppings=toppings,
         costo_total=costo_total, margen=round(precio_venta - costo_total, 2),
+        max_sabores=row["max_sabores"], max_toppings=row["max_toppings"],
     )
 
 
@@ -509,6 +512,24 @@ def toggle_activo(receta_id: int, payload: RecetaActivoIn, current_user: UserOut
         conn.run(
             "UPDATE recetas SET activo = :activo WHERE id = :id AND usuario_id = :uid",
             id=receta_id, uid=current_user.tenant_id, activo=payload.activo,
+        )
+        return _row_to_receta(conn, _get_receta_or_404(conn, current_user.tenant_id, receta_id))
+    finally:
+        conn.close()
+
+
+@router.patch("/{receta_id}/limites", response_model=RecetaOut)
+def actualizar_limites(receta_id: int, payload: RecetaLimitesIn, current_user: UserOut = Depends(get_current_user)):
+    """Cuántos sabores/toppings distintos puede elegir el cliente para este producto —
+    independiente del resto del producto, igual que /sabores y /toppings."""
+    conn = get_connection()
+    try:
+        _get_receta_or_404(conn, current_user.tenant_id, receta_id)
+        conn.run(
+            "UPDATE recetas SET max_sabores = :max_sabores, max_toppings = :max_toppings "
+            "WHERE id = :id AND usuario_id = :uid",
+            id=receta_id, uid=current_user.tenant_id,
+            max_sabores=payload.max_sabores, max_toppings=payload.max_toppings,
         )
         return _row_to_receta(conn, _get_receta_or_404(conn, current_user.tenant_id, receta_id))
     finally:
