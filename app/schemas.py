@@ -267,6 +267,22 @@ class SaborOut(BaseModel):
     activo: bool
 
 
+class RecetaSaborIn(BaseModel):
+    id: int
+    precio_adicional: float = 0
+
+
+class RecetaSaborOut(BaseModel):
+    id: int
+    nombre: str
+    activo: bool
+    precio_adicional: float
+
+
+class RecetaSaboresUpdateIn(BaseModel):
+    sabores: list[RecetaSaborIn] = []
+
+
 class ToppingIn(BaseModel):
     nombre: str = Field(min_length=1, max_length=80)
     foto_url: Optional[str] = None
@@ -307,7 +323,7 @@ class CatalogoItemOut(BaseModel):
     precio_venta: float
     disponible: Optional[int] = None
     imagen_url: Optional[str] = None
-    sabores: list[SaborOut] = []
+    sabores: list[RecetaSaborOut] = []
     toppings: list[RecetaToppingOut] = []
 
 
@@ -524,7 +540,7 @@ class RecetaIn(BaseModel):
     activo: bool = True
     imagen_url: Optional[str] = None
     ingredientes: list[RecetaIngredienteIn] = []
-    sabores: list[int] = []
+    sabores: list[RecetaSaborIn] = []
     toppings: list[RecetaToppingIn] = []
 
 
@@ -552,7 +568,7 @@ class RecetaOut(BaseModel):
     created_at: datetime
     imagen_url: Optional[str] = None
     ingredientes: list[RecetaIngredienteOut] = []
-    sabores: list[SaborOut] = []
+    sabores: list[RecetaSaborOut] = []
     toppings: list[RecetaToppingOut] = []
     costo_total: float
     margen: float

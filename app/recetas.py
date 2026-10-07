@@ -14,9 +14,10 @@ from app.schemas import (
     RecetaIn,
     RecetaIngredienteOut,
     RecetaOut,
+    RecetaSaborOut,
+    RecetaSaboresUpdateIn,
     RecetaToppingOut,
     RecetaToppingsUpdateIn,
-    SaborOut,
 )
 
 router = APIRouter(prefix="/recetas", dependencies=[Depends(get_current_user)])
@@ -38,7 +39,7 @@ INGREDIENTE_SELECT = """
 """
 
 SABOR_DE_RECETA_SELECT = """
-    SELECT s.id, s.nombre, s.activo
+    SELECT s.id, s.nombre, s.activo, rs.precio_adicional
     FROM receta_sabores rs
     JOIN sabores s ON s.id = rs.id_sabor
     WHERE rs.id_receta = :id_receta
@@ -167,9 +168,9 @@ def _get_ingredientes(conn, receta_id: int) -> list[RecetaIngredienteOut]:
     ]
 
 
-def _get_sabores(conn, receta_id: int) -> list[SaborOut]:
+def _get_sabores(conn, receta_id: int) -> list[RecetaSaborOut]:
     rows = conn.run(SABOR_DE_RECETA_SELECT, id_receta=receta_id)
-    return [SaborOut(id=r[0], nombre=r[1], activo=r[2]) for r in rows]
+    return [RecetaSaborOut(id=r[0], nombre=r[1], activo=r[2], precio_adicional=float(r[3])) for r in rows]
 
 
 def _get_toppings(conn, receta_id: int) -> list[RecetaToppingOut]:
@@ -267,17 +268,21 @@ def _set_ingredientes(conn, usuario_id: int, receta_id: int, ingredientes) -> No
         )
 
 
-def _set_sabores(conn, usuario_id: int, receta_id: int, sabor_ids: list[int]) -> None:
+def _set_sabores(conn, usuario_id: int, receta_id: int, sabores: list) -> None:
     conn.run("DELETE FROM receta_sabores WHERE id_receta = :id", id=receta_id)
-    for sabor_id in set(sabor_ids):
+    vistos: set[int] = set()
+    for s in sabores:
+        if s.id in vistos:
+            continue
+        vistos.add(s.id)
         existe = conn.run(
-            "SELECT 1 FROM sabores WHERE id = :id AND usuario_id = :uid", id=sabor_id, uid=usuario_id
+            "SELECT 1 FROM sabores WHERE id = :id AND usuario_id = :uid", id=s.id, uid=usuario_id
         )
         if not existe:
             continue
         conn.run(
-            "INSERT INTO receta_sabores (id_receta, id_sabor) VALUES (:receta, :sabor)",
-            receta=receta_id, sabor=sabor_id,
+            "INSERT INTO receta_sabores (id_receta, id_sabor, precio_adicional) VALUES (:receta, :sabor, :precio)",
+            receta=receta_id, sabor=s.id, precio=s.precio_adicional,
         )
 
 
@@ -363,6 +368,22 @@ def update_receta(receta_id: int, payload: RecetaIn, current_user: UserOut = Dep
         _set_sabores(conn, current_user.tenant_id, receta_id, payload.sabores)
         _set_toppings(conn, current_user.tenant_id, receta_id, payload.toppings)
         return _row_to_receta(conn, _get_receta_or_404(conn, current_user.tenant_id, receta_id))
+    finally:
+        conn.close()
+
+
+@router.put("/{receta_id}/sabores", response_model=list[RecetaSaborOut])
+def set_receta_sabores(
+    receta_id: int, payload: RecetaSaboresUpdateIn, current_user: UserOut = Depends(get_current_user)
+):
+    """Reemplaza solo los sabores de esta receta — a diferencia de PUT /recetas/{id}, no toca
+    el resto del producto. Pensada para la página de Sabores: ahí se elige primero el producto
+    y luego se arman (o reutilizan) sus sabores, sin tener que reenviar la receta completa."""
+    conn = get_connection()
+    try:
+        _get_receta_or_404(conn, current_user.tenant_id, receta_id)
+        _set_sabores(conn, current_user.tenant_id, receta_id, payload.sabores)
+        return _get_sabores(conn, receta_id)
     finally:
         conn.close()
 

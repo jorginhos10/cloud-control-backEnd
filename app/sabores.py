@@ -3,7 +3,7 @@ from pg8000.exceptions import DatabaseError
 
 from app.auth import UserOut, get_current_user
 from app.database import get_connection
-from app.schemas import SaborActivoIn, SaborIn, SaborOut
+from app.schemas import RecetaSaborOut, SaborActivoIn, SaborIn, SaborOut
 
 router = APIRouter(prefix="/sabores", dependencies=[Depends(get_current_user)])
 
@@ -16,21 +16,22 @@ def _row_to_sabor(row: dict) -> SaborOut:
     return SaborOut(id=row["id"], nombre=row["nombre"], activo=row["activo"])
 
 
-def sabores_por_receta(conn, receta_ids: list[int]) -> dict[int, list[SaborOut]]:
+def sabores_por_receta(conn, receta_ids: list[int]) -> dict[int, list[RecetaSaborOut]]:
     """Sabores activos de varias recetas en una sola consulta, agrupados por receta_id —
-    para armar un catálogo sin pedirlos receta por receta (N+1)."""
-    agrupado: dict[int, list[SaborOut]] = {rid: [] for rid in receta_ids}
+    para armar un catálogo sin pedirlos receta por receta (N+1). Incluye el valor adicional
+    que ese sabor tiene específicamente en cada receta."""
+    agrupado: dict[int, list[RecetaSaborOut]] = {rid: [] for rid in receta_ids}
     if not receta_ids:
         return agrupado
     rows = conn.run(
-        "SELECT rs.id_receta, s.id, s.nombre, s.activo "
+        "SELECT rs.id_receta, s.id, s.nombre, s.activo, rs.precio_adicional "
         "FROM receta_sabores rs JOIN sabores s ON s.id = rs.id_sabor "
         "WHERE rs.id_receta = ANY(:ids) AND s.activo = true "
         "ORDER BY s.nombre",
         ids=receta_ids,
     )
     for r in rows:
-        agrupado[r[0]].append(SaborOut(id=r[1], nombre=r[2], activo=r[3]))
+        agrupado[r[0]].append(RecetaSaborOut(id=r[1], nombre=r[2], activo=r[3], precio_adicional=float(r[4])))
     return agrupado
 
 

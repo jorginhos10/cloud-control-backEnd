@@ -119,13 +119,14 @@ def _validar_items(conn, usuario_id: int, items_in) -> list[dict]:
         sabor_nombre = None
         if sabor_id is not None:
             sabor = conn.run(
-                "SELECT s.nombre FROM receta_sabores rs JOIN sabores s ON s.id = rs.id_sabor "
+                "SELECT s.nombre, rs.precio_adicional FROM receta_sabores rs JOIN sabores s ON s.id = rs.id_sabor "
                 "WHERE rs.id_receta = :rid AND s.id = :sid",
                 rid=item.receta_id, sid=sabor_id,
             )
             if not sabor:
                 continue
             sabor_nombre = sabor[0][0]
+            precio += float(sabor[0][1])
 
         topping_id = getattr(item, "topping_id", None)
         topping_nombre = None

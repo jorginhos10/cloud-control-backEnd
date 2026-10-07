@@ -784,15 +784,17 @@ def agregar_item(venta_id: int, payload: VentaItemIn, current_user: UserOut = De
         nombre, precio_venta = receta[0][0], float(receta[0][1])
 
         sabor_nombre = None
+        sabor_extra = 0.0
         if payload.sabor_id is not None:
             sabor = conn.run(
-                "SELECT s.nombre FROM receta_sabores rs JOIN sabores s ON s.id = rs.id_sabor "
+                "SELECT s.nombre, rs.precio_adicional FROM receta_sabores rs JOIN sabores s ON s.id = rs.id_sabor "
                 "WHERE rs.id_receta = :rid AND s.id = :sid",
                 rid=payload.receta_id, sid=payload.sabor_id,
             )
             if not sabor:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ese sabor no está disponible para esta receta")
             sabor_nombre = sabor[0][0]
+            sabor_extra = float(sabor[0][1])
 
         topping_nombre = None
         topping_extra = 0.0
@@ -807,9 +809,9 @@ def agregar_item(venta_id: int, payload: VentaItemIn, current_user: UserOut = De
             topping_nombre = topping[0][0]
             topping_extra = float(topping[0][1])
 
-        # El valor adicional del topping (si tiene) se suma al precio de venta de la receta para
-        # formar el precio unitario real de esta línea.
-        precio_unitario = precio_venta + topping_extra
+        # El valor adicional del sabor y/o el topping (si tienen) se suma al precio de venta de
+        # la receta para formar el precio unitario real de esta línea.
+        precio_unitario = precio_venta + sabor_extra + topping_extra
 
         consumo = _consumo_de_receta(conn, payload.receta_id, payload.cantidad)
 
