@@ -908,11 +908,15 @@ class DomicilioTokenOut(BaseModel):
 
 class DomicilioChatMensajeIn(BaseModel):
     mensaje: str = Field(min_length=1, max_length=1000)
+    # Solo lo usa el cliente (endpoints de domicilio_publico); el restaurante y el domiciliario
+    # siempre escriben en su propio hilo, fijado del lado del servidor.
+    destino: Literal["restaurante", "domiciliario"] = "restaurante"
 
 
 class DomicilioChatMensajeOut(BaseModel):
     id: int
-    de: Literal["cliente", "admin"]
+    de: Literal["cliente", "admin", "domiciliario"]
+    para: Literal["restaurante", "domiciliario"] = "restaurante"
     mensaje: str
     leido: bool
     created_at: datetime

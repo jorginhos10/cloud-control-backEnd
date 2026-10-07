@@ -178,17 +178,29 @@ def estado_pedido(token: str, token_pedido: str):
 
 
 @router.get("/{token}/pedido/{token_pedido}/chat", response_model=list[DomicilioChatMensajeOut])
-def chat_cliente_mensajes(token: str, token_pedido: str):
+def chat_cliente_mensajes(
+    token: str,
+    token_pedido: str,
+    destino: str = Query(default="restaurante", pattern="^(restaurante|domiciliario)$"),
+):
     conn = get_connection()
     try:
         usuario_id = _resolver_usuario(conn, token)
         dom = _get_by_token_pedido(conn, usuario_id, token_pedido)
-        conn.run("UPDATE domicilio_chat SET leido = true WHERE domicilio_id = :id AND de = 'admin'", id=dom["id"])
-        rows = conn.run(
-            f"SELECT {', '.join(CHAT_COLUMNS)} FROM domicilio_chat WHERE domicilio_id = :id ORDER BY created_at",
-            id=dom["id"],
+        de_contraparte = "admin" if destino == "restaurante" else "domiciliario"
+        conn.run(
+            "UPDATE domicilio_chat SET leido = true WHERE domicilio_id = :id AND de = :de AND para = :para",
+            id=dom["id"], de=de_contraparte, para=destino,
         )
-        return [DomicilioChatMensajeOut(id=r[0], de=r[1], mensaje=r[2], leido=r[3], created_at=r[4]) for r in rows]
+        rows = conn.run(
+            f"SELECT {', '.join(CHAT_COLUMNS)} FROM domicilio_chat "
+            "WHERE domicilio_id = :id AND para = :para ORDER BY created_at",
+            id=dom["id"], para=destino,
+        )
+        return [
+            DomicilioChatMensajeOut(id=r[0], de=r[1], para=r[2], mensaje=r[3], leido=r[4], created_at=r[5])
+            for r in rows
+        ]
     finally:
         conn.close()
 
@@ -203,13 +215,17 @@ def chat_cliente_enviar(token: str, token_pedido: str, payload: DomicilioChatMen
     try:
         usuario_id = _resolver_usuario(conn, token)
         dom = _get_by_token_pedido(conn, usuario_id, token_pedido)
+        if payload.destino == "domiciliario" and dom["repartidor_id"] is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Tu pedido aún no tiene un domiciliario asignado"
+            )
         rows = conn.run(
-            f"INSERT INTO domicilio_chat (domicilio_id, de, mensaje) VALUES (:id, 'cliente', :msg) "
+            f"INSERT INTO domicilio_chat (domicilio_id, de, para, mensaje) VALUES (:id, 'cliente', :para, :msg) "
             f"RETURNING {', '.join(CHAT_COLUMNS)}",
-            id=dom["id"], msg=payload.mensaje.strip(),
+            id=dom["id"], para=payload.destino, msg=payload.mensaje.strip(),
         )
         r = rows[0]
-        return DomicilioChatMensajeOut(id=r[0], de=r[1], mensaje=r[2], leido=r[3], created_at=r[4])
+        return DomicilioChatMensajeOut(id=r[0], de=r[1], para=r[2], mensaje=r[3], leido=r[4], created_at=r[5])
     finally:
         conn.close()
 
@@ -280,7 +296,7 @@ def modificar_pedido(token: str, token_pedido: str, payload: DomicilioPedidoIn):
             )
         # Aviso en el chat del pedido para que el negocio note el cambio antes de aceptarlo.
         conn.run(
-            "INSERT INTO domicilio_chat (domicilio_id, de, mensaje) VALUES (:id, 'cliente', :msg)",
+            "INSERT INTO domicilio_chat (domicilio_id, de, para, mensaje) VALUES (:id, 'cliente', 'restaurante', :msg)",
             id=dom["id"], msg="El cliente modificó su pedido.",
         )
         return _row_to_domicilio(conn, _get_domicilio_or_404(conn, usuario_id, dom["id"]))

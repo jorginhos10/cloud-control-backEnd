@@ -31,7 +31,7 @@ DOMICILIO_COLUMNS = [
 ITEM_COLUMNS = [
     "id", "receta_id", "nombre", "precio", "cantidad", "sabor_id", "sabor_nombre", "topping_id", "topping_nombre",
 ]
-CHAT_COLUMNS = ["id", "de", "mensaje", "leido", "created_at"]
+CHAT_COLUMNS = ["id", "de", "para", "mensaje", "leido", "created_at"]
 
 
 def _get_items(conn, domicilio_id: int) -> list[DomicilioItemOut]:
@@ -435,7 +435,7 @@ def modificar_pedido(domicilio_id: int, payload: DomicilioInternoIn, current_use
             )
         # Aviso en el chat para que el cliente vea que el negocio ajustó su pedido.
         conn.run(
-            "INSERT INTO domicilio_chat (domicilio_id, de, mensaje) VALUES (:id, 'admin', :msg)",
+            "INSERT INTO domicilio_chat (domicilio_id, de, para, mensaje) VALUES (:id, 'admin', 'restaurante', :msg)",
             id=dom["id"], msg="El negocio modificó tu pedido.",
         )
         return _row_to_domicilio(conn, _get_domicilio_or_404(conn, current_user.tenant_id, dom["id"]))
@@ -482,7 +482,7 @@ def cambiar_estado(domicilio_id: int, payload: DomicilioEstadoIn, current_user: 
         )
         if payload.estado == "cancelado" and motivo_cancelacion:
             conn.run(
-                "INSERT INTO domicilio_chat (domicilio_id, de, mensaje) VALUES (:id, 'admin', :msg)",
+                "INSERT INTO domicilio_chat (domicilio_id, de, para, mensaje) VALUES (:id, 'admin', 'restaurante', :msg)",
                 id=domicilio_id, msg=f"Pedido cancelado: {motivo_cancelacion}",
             )
         return _row_to_domicilio(conn, _get_domicilio_or_404(conn, current_user.tenant_id, domicilio_id))
@@ -523,11 +523,11 @@ def chat_resumen(current_user: UserOut = Depends(get_current_user)):
             "FROM domicilios d "
             "LEFT JOIN LATERAL ("
             "    SELECT mensaje, de, created_at FROM domicilio_chat "
-            "    WHERE domicilio_id = d.id ORDER BY created_at DESC LIMIT 1"
+            "    WHERE domicilio_id = d.id AND para = 'restaurante' ORDER BY created_at DESC LIMIT 1"
             ") lm ON true "
             "LEFT JOIN ("
             "    SELECT domicilio_id, COUNT(*) AS cnt FROM domicilio_chat "
-            "    WHERE de = 'cliente' AND leido = false GROUP BY domicilio_id"
+            "    WHERE de = 'cliente' AND para = 'restaurante' AND leido = false GROUP BY domicilio_id"
             ") nl ON nl.domicilio_id = d.id "
             "WHERE d.usuario_id = :uid AND d.estado NOT IN ('entregado', 'cancelado') "
             "ORDER BY COALESCE(lm.created_at, d.created_at) DESC",
@@ -550,13 +550,18 @@ def chat_mensajes(domicilio_id: int, current_user: UserOut = Depends(get_current
     try:
         _get_domicilio_or_404(conn, current_user.tenant_id, domicilio_id)
         conn.run(
-            "UPDATE domicilio_chat SET leido = true WHERE domicilio_id = :id AND de = 'cliente'", id=domicilio_id
-        )
-        rows = conn.run(
-            f"SELECT {', '.join(CHAT_COLUMNS)} FROM domicilio_chat WHERE domicilio_id = :id ORDER BY created_at",
+            "UPDATE domicilio_chat SET leido = true WHERE domicilio_id = :id AND de = 'cliente' AND para = 'restaurante'",
             id=domicilio_id,
         )
-        return [DomicilioChatMensajeOut(id=r[0], de=r[1], mensaje=r[2], leido=r[3], created_at=r[4]) for r in rows]
+        rows = conn.run(
+            f"SELECT {', '.join(CHAT_COLUMNS)} FROM domicilio_chat "
+            "WHERE domicilio_id = :id AND para = 'restaurante' ORDER BY created_at",
+            id=domicilio_id,
+        )
+        return [
+            DomicilioChatMensajeOut(id=r[0], de=r[1], para=r[2], mensaje=r[3], leido=r[4], created_at=r[5])
+            for r in rows
+        ]
     finally:
         conn.close()
 
@@ -569,11 +574,59 @@ def chat_enviar(
     try:
         _get_domicilio_or_404(conn, current_user.tenant_id, domicilio_id)
         rows = conn.run(
-            f"INSERT INTO domicilio_chat (domicilio_id, de, mensaje) VALUES (:id, 'admin', :msg) "
+            f"INSERT INTO domicilio_chat (domicilio_id, de, para, mensaje) VALUES (:id, 'admin', 'restaurante', :msg) "
             f"RETURNING {', '.join(CHAT_COLUMNS)}",
             id=domicilio_id, msg=payload.mensaje.strip(),
         )
         r = rows[0]
-        return DomicilioChatMensajeOut(id=r[0], de=r[1], mensaje=r[2], leido=r[3], created_at=r[4])
+        return DomicilioChatMensajeOut(id=r[0], de=r[1], para=r[2], mensaje=r[3], leido=r[4], created_at=r[5])
+    finally:
+        conn.close()
+
+
+@router.get("/{domicilio_id}/chat-domiciliario", response_model=list[DomicilioChatMensajeOut])
+def chat_domiciliario_mensajes(domicilio_id: int, current_user: UserOut = Depends(get_current_user)):
+    """Hilo aparte entre el cliente y el domiciliario que reclamó el pedido."""
+    conn = get_connection()
+    try:
+        dom = _get_domicilio_or_404(conn, current_user.tenant_id, domicilio_id)
+        if current_user.rol == "domiciliario" and dom["repartidor_id"] != current_user.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Este pedido no está asignado a ti")
+        conn.run(
+            "UPDATE domicilio_chat SET leido = true WHERE domicilio_id = :id AND de = 'cliente' AND para = 'domiciliario'",
+            id=domicilio_id,
+        )
+        rows = conn.run(
+            f"SELECT {', '.join(CHAT_COLUMNS)} FROM domicilio_chat "
+            "WHERE domicilio_id = :id AND para = 'domiciliario' ORDER BY created_at",
+            id=domicilio_id,
+        )
+        return [
+            DomicilioChatMensajeOut(id=r[0], de=r[1], para=r[2], mensaje=r[3], leido=r[4], created_at=r[5])
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+@router.post(
+    "/{domicilio_id}/chat-domiciliario", response_model=DomicilioChatMensajeOut, status_code=status.HTTP_201_CREATED
+)
+def chat_domiciliario_enviar(
+    domicilio_id: int, payload: DomicilioChatMensajeIn, current_user: UserOut = Depends(get_current_user)
+):
+    conn = get_connection()
+    try:
+        dom = _get_domicilio_or_404(conn, current_user.tenant_id, domicilio_id)
+        if current_user.rol == "domiciliario" and dom["repartidor_id"] != current_user.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Este pedido no está asignado a ti")
+        rows = conn.run(
+            f"INSERT INTO domicilio_chat (domicilio_id, de, para, mensaje) "
+            f"VALUES (:id, 'domiciliario', 'domiciliario', :msg) "
+            f"RETURNING {', '.join(CHAT_COLUMNS)}",
+            id=domicilio_id, msg=payload.mensaje.strip(),
+        )
+        r = rows[0]
+        return DomicilioChatMensajeOut(id=r[0], de=r[1], para=r[2], mensaje=r[3], leido=r[4], created_at=r[5])
     finally:
         conn.close()
