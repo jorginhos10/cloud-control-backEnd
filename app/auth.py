@@ -10,12 +10,17 @@ from pg8000.exceptions import DatabaseError
 from app import geo
 from app.database import get_connection, get_superadmin_connection
 from app.schemas import CambiarPasswordIn, ImpersonateIn, LoginIn, PerfilUpdateIn, RegisterIn, TokenOut, UserOut
-from app.security import create_access_token, decode_access_token, hash_password, verify_password
+from app.security import JWT_EXPIRE_MINUTES, create_access_token, decode_access_token, hash_password, verify_password
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 bearer_scheme = HTTPBearer()
 
 UNIQUE_VIOLATION = "23505"
+
+# La app de domiciliarios no tiene refresh token; sesiones cortas ahí solo logran que el
+# repartidor tenga que relogearse a mitad de turno. 30 días es normal para un rol de un solo
+# propósito en un celular propio — el resto de roles (web) se queda con JWT_EXPIRE_MINUTES.
+DOMICILIARIO_JWT_EXPIRE_MINUTES = 60 * 24 * 30
 
 USER_COLUMNS = [
     "id", "username", "nombre", "email", "rol", "activo", "propietario", "ultimo_login", "propietario_id",
@@ -173,7 +178,12 @@ def login(payload: LoginIn):
             id=row["id"],
         )
         user = _row_to_user(dict(zip(USER_COLUMNS, updated[0])))
-        token = create_access_token(user_id=user.id, email=user.email)
+        # La app de domiciliarios no tiene refresco de sesión: si el token se vence a mitad de
+        # turno, el repartidor ve "token inválido" en cada pantalla hasta que alguien le explica
+        # que tiene que cerrar sesión y volver a entrar. Un token de más duración para ese rol
+        # evita el problema de raíz en vez de solo maquillarlo.
+        expire_minutes = DOMICILIARIO_JWT_EXPIRE_MINUTES if user.rol == "domiciliario" else JWT_EXPIRE_MINUTES
+        token = create_access_token(user_id=user.id, email=user.email, expire_minutes=expire_minutes)
         return TokenOut(access_token=token, user=user)
     finally:
         conn.close()
