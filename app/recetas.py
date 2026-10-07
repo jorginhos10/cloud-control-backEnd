@@ -6,6 +6,7 @@ from pg8000.exceptions import DatabaseError
 
 from app.auth import UserOut, get_current_user
 from app.database import get_connection
+from app.imagenes import generar_thumbnail
 from app.schemas import (
     CategoriaRecetaIn,
     CategoriaRecetaOut,
@@ -27,7 +28,7 @@ FOREIGN_KEY_VIOLATION = "23503"
 CATEGORIA_COLUMNS = ["id", "key", "label"]
 RECETA_COLUMNS = [
     "id", "nombre", "descripcion", "categoria_key", "tiempo_preparacion",
-    "porciones", "precio_venta", "activo", "created_at", "imagen_url",
+    "porciones", "precio_venta", "activo", "created_at", "imagen_url", "imagen_thumb_url",
 ]
 
 INGREDIENTE_SELECT = """
@@ -143,7 +144,7 @@ def _receta_select(where: str = "") -> str:
     return (
         "SELECT recetas.id, recetas.nombre, recetas.descripcion, receta_categorias.key AS categoria_key, "
         "recetas.tiempo_preparacion, recetas.porciones, recetas.precio_venta, recetas.activo, recetas.created_at, "
-        "recetas.imagen_url "
+        "recetas.imagen_url, recetas.imagen_thumb_url "
         "FROM recetas JOIN receta_categorias ON receta_categorias.id = recetas.categoria_id " + where
     )
 
@@ -221,21 +222,23 @@ def _sabores_por_receta_admin(conn, receta_ids: list[int]) -> dict[int, list[Rec
     return agrupado
 
 
-def _toppings_por_receta_admin(conn, receta_ids: list[int]) -> dict[int, list[RecetaToppingOut]]:
+def _toppings_por_receta_admin(conn, receta_ids: list[int], thumbnail: bool = False) -> dict[int, list[RecetaToppingOut]]:
     """Igual que _get_toppings pero para varias recetas en una sola consulta (ver nota de
-    _sabores_por_receta_admin sobre por qué no reutiliza la versión filtrada por activo)."""
+    _sabores_por_receta_admin sobre por qué no reutiliza la versión filtrada por activo).
+    thumbnail=True devuelve la miniatura del topping en vez de la foto completa (ver list_recetas)."""
     agrupado: dict[int, list[RecetaToppingOut]] = {rid: [] for rid in receta_ids}
     if not receta_ids:
         return agrupado
     rows = conn.run(
-        "SELECT rt.id_receta, t.id, t.nombre, t.activo, rt.precio_adicional, t.foto_url "
+        "SELECT rt.id_receta, t.id, t.nombre, t.activo, rt.precio_adicional, t.foto_url, t.foto_thumb_url "
         "FROM receta_toppings rt JOIN toppings t ON t.id = rt.id_topping "
         "WHERE rt.id_receta = ANY(:ids) ORDER BY t.nombre",
         ids=receta_ids,
     )
     for r in rows:
+        foto_url = (r[6] or r[5]) if thumbnail else r[5]
         agrupado[r[0]].append(
-            RecetaToppingOut(id=r[1], nombre=r[2], activo=r[3], precio_adicional=float(r[4]), foto_url=r[5])
+            RecetaToppingOut(id=r[1], nombre=r[2], activo=r[3], precio_adicional=float(r[4]), foto_url=foto_url)
         )
     return agrupado
 
@@ -287,7 +290,16 @@ def list_recetas(q: str = Query(default=""), current_user: UserOut = Depends(get
         receta_ids = [r["id"] for r in recetas]
         ingredientes_map = _ingredientes_por_receta(conn, receta_ids)
         sabores_map = _sabores_por_receta_admin(conn, receta_ids)
+        # Los toppings embebidos en cada receta SÍ se usan luego para editar el topping desde la
+        # página de Toppings (reenvía foto_url tal cual al guardar) — si aquí fuera la miniatura,
+        # guardar sin tocar la foto la degradaría para siempre. Se dejan en foto_url completa;
+        # como foto_url de topping es opcional y hoy casi nadie la usa, el peso es marginal.
         toppings_map = _toppings_por_receta_admin(conn, receta_ids)
+        # El listado usa la miniatura del PRODUCTO en vez de la foto completa: la foto completa de
+        # cada producto puede pesar ~130KB en base64, y con 80-90 productos eso son varios MB de
+        # JSON solo para pintar tarjetas de 48-56px. El detalle (GET /recetas/{id}) trae la completa.
+        for r in recetas:
+            r["imagen_url"] = r.get("imagen_thumb_url") or r["imagen_url"]
         return [
             _build_receta_out(r, ingredientes_map[r["id"]], sabores_map[r["id"]], toppings_map[r["id"]])
             for r in recetas
@@ -398,8 +410,8 @@ def create_receta(payload: RecetaIn, current_user: UserOut = Depends(get_current
         categoria_id = _categoria_id_for_key(conn, current_user.tenant_id, payload.categoria)
         rows = conn.run(
             "INSERT INTO recetas (usuario_id, nombre, descripcion, categoria_id, tiempo_preparacion, porciones, "
-            "precio_venta, activo, imagen_url) "
-            "VALUES (:uid, :nombre, :descripcion, :categoria_id, :tiempo, :porciones, :precio, :activo, :imagen_url) "
+            "precio_venta, activo, imagen_url, imagen_thumb_url) "
+            "VALUES (:uid, :nombre, :descripcion, :categoria_id, :tiempo, :porciones, :precio, :activo, :imagen_url, :imagen_thumb_url) "
             "RETURNING id",
             uid=current_user.tenant_id,
             nombre=payload.nombre.strip(),
@@ -410,6 +422,7 @@ def create_receta(payload: RecetaIn, current_user: UserOut = Depends(get_current
             precio=payload.precio_venta,
             activo=payload.activo,
             imagen_url=payload.imagen_url,
+            imagen_thumb_url=generar_thumbnail(payload.imagen_url),
         )
         receta_id = rows[0][0]
         _set_ingredientes(conn, current_user.tenant_id, receta_id, payload.ingredientes)
@@ -429,7 +442,7 @@ def update_receta(receta_id: int, payload: RecetaIn, current_user: UserOut = Dep
         conn.run(
             "UPDATE recetas SET nombre = :nombre, descripcion = :descripcion, categoria_id = :categoria_id, "
             "tiempo_preparacion = :tiempo, porciones = :porciones, precio_venta = :precio, activo = :activo, "
-            "imagen_url = :imagen_url "
+            "imagen_url = :imagen_url, imagen_thumb_url = :imagen_thumb_url "
             "WHERE id = :id AND usuario_id = :uid",
             id=receta_id,
             uid=current_user.tenant_id,
@@ -441,6 +454,7 @@ def update_receta(receta_id: int, payload: RecetaIn, current_user: UserOut = Dep
             precio=payload.precio_venta,
             activo=payload.activo,
             imagen_url=payload.imagen_url,
+            imagen_thumb_url=generar_thumbnail(payload.imagen_url),
         )
         _set_ingredientes(conn, current_user.tenant_id, receta_id, payload.ingredientes)
         _set_sabores(conn, current_user.tenant_id, receta_id, payload.sabores)
