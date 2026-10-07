@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.auth import UserOut, get_current_user
 from app.database import get_connection
+from app.numeracion_ordenes import generar_numero_orden
 from app.sabores import sabores_por_receta
 from app.toppings import toppings_por_receta
 from app.schemas import (
@@ -412,7 +413,7 @@ def cocina_historial(current_user: UserOut = Depends(get_current_user)):
 VENTA_COLUMNS = [
     "id", "mesa_id", "tipo", "estado", "total", "descuento", "cupon_id", "cupon_codigo",
     "notas", "metodo_pago", "pago_efectivo", "pago_tarjeta", "pago_transferencia", "propina",
-    "fecha_apertura", "fecha_cierre", "cliente_id",
+    "fecha_apertura", "fecha_cierre", "cliente_id", "numero_orden",
 ]
 ITEM_COLUMNS = [
     "id", "receta_id", "nombre", "cantidad", "precio_unitario", "subtotal", "sabor_nombre", "topping_nombre",
@@ -462,6 +463,7 @@ def _get_venta_con_items(conn, usuario_id: int, venta_id: int) -> VentaOut:
         fecha_cierre=v["fecha_cierre"],
         cliente_id=v["cliente_id"],
         cliente_nombre=cliente_nombre,
+        numero_orden=v["numero_orden"],
         items=[_row_to_item(r) for r in item_rows],
     )
 
@@ -601,13 +603,16 @@ def listado_ventas(
                 clauses.append("v.tipo = :tipo")
                 params["tipo"] = tipo
             if buscar.strip():
-                clauses.append("(CAST(v.id AS TEXT) ILIKE :buscar OR CAST(m.numero AS TEXT) ILIKE :buscar)")
+                clauses.append(
+                    "(CAST(v.id AS TEXT) ILIKE :buscar OR CAST(m.numero AS TEXT) ILIKE :buscar "
+                    "OR v.numero_orden ILIKE :buscar)"
+                )
                 params["buscar"] = f"%{buscar.strip()}%"
             where_sql = " AND ".join(clauses)
 
             rows = conn.run(
                 f"SELECT v.id, v.fecha_apertura, v.tipo, v.estado, m.numero AS mesa_numero, "
-                f"COALESCE(ic.cnt, 0) AS platos, v.total, v.metodo_pago "
+                f"COALESCE(ic.cnt, 0) AS platos, v.total, v.metodo_pago, v.numero_orden "
                 f"FROM ventas v "
                 f"LEFT JOIN mesas m ON m.id = v.mesa_id "
                 f"LEFT JOIN (SELECT venta_id, COALESCE(SUM(cantidad), 0) AS cnt FROM venta_items GROUP BY venta_id) ic "
@@ -620,6 +625,7 @@ def listado_ventas(
                 VentaListadoItemOut(
                     id=r[0], fecha=r[1], tipo=r[2], estado=r[3], mesa_numero=r[4],
                     platos=r[5], total=float(r[6]), metodo_pago=r[7] or None,
+                    numero_orden=r[8] or f"#{r[0]}",
                 )
                 for r in rows
             ]
@@ -647,6 +653,7 @@ def listado_ventas(
                 VentaListadoItemOut(
                     id=r[0], fecha=r[1], tipo="domicilio", estado="cerrada", mesa_numero=None,
                     platos=r[2], total=float(r[3]), metodo_pago=r[4] or None,
+                    numero_orden=f"DOM-{r[0]}",
                 )
                 for r in d_rows
             ]
@@ -732,11 +739,12 @@ def abrir_orden(payload: VentaCrearIn, current_user: UserOut = Depends(get_curre
     conn = get_connection()
     try:
         if payload.mesa_id is None:
+            numero_orden = generar_numero_orden(conn, current_user.tenant_id)
             rows = conn.run(
-                "INSERT INTO ventas (mesa_id, tipo, estado, usuario_id, creado_por_id) "
-                "VALUES (NULL, 'directa', 'abierta', :uid, :cid) "
+                "INSERT INTO ventas (mesa_id, tipo, estado, usuario_id, creado_por_id, numero_orden) "
+                "VALUES (NULL, 'directa', 'abierta', :uid, :cid, :numero) "
                 f"RETURNING {', '.join(VENTA_COLUMNS)}",
-                uid=current_user.tenant_id, cid=current_user.id,
+                uid=current_user.tenant_id, cid=current_user.id, numero=numero_orden,
             )
             return _get_venta_con_items(conn, current_user.tenant_id, rows[0][0])
 
@@ -766,13 +774,15 @@ def abrir_orden(payload: VentaCrearIn, current_user: UserOut = Depends(get_curre
                 detail=f"La mesa está {estado_mesa}; cambia su estado antes de abrir una orden",
             )
 
+        numero_orden = generar_numero_orden(conn, current_user.tenant_id)
         rows = conn.run(
-            "INSERT INTO ventas (mesa_id, tipo, estado, usuario_id, creado_por_id) "
-            "VALUES (:mesa_id, 'mesa', 'abierta', :uid, :cid) "
+            "INSERT INTO ventas (mesa_id, tipo, estado, usuario_id, creado_por_id, numero_orden) "
+            "VALUES (:mesa_id, 'mesa', 'abierta', :uid, :cid, :numero) "
             f"RETURNING {', '.join(VENTA_COLUMNS)}",
             mesa_id=payload.mesa_id,
             uid=current_user.tenant_id,
             cid=current_user.id,
+            numero=numero_orden,
         )
         conn.run("UPDATE mesas SET estado = 'ocupada' WHERE id = :id", id=payload.mesa_id)
         venta_id = rows[0][0]

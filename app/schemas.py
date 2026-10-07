@@ -197,6 +197,7 @@ class VentaOut(BaseModel):
     fecha_cierre: Optional[datetime] = None
     cliente_id: Optional[int] = None
     cliente_nombre: Optional[str] = None
+    numero_orden: Optional[str] = None
     items: list[VentaItemOut] = []
 
 
@@ -233,6 +234,7 @@ class VentaListadoItemOut(BaseModel):
     platos: int
     total: float
     metodo_pago: Optional[MetodoPago] = None
+    numero_orden: str
 
 
 class PropinaItemOut(BaseModel):
