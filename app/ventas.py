@@ -29,6 +29,9 @@ from app.schemas import (
     VentaListadoOut,
     VentaNotasIn,
     VentaOut,
+    VentaPagoIn,
+    VentaPagoOut,
+    VentaCuentaDivididaOut,
 )
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
@@ -1139,6 +1142,103 @@ def cobrar_orden(venta_id: int, payload: VentaCobrarIn, current_user: UserOut = 
 
         _liberar_mesa_si_corresponde(conn, venta["mesa_id"])
         return _get_venta_con_items(conn, current_user.tenant_id, venta_id)
+    finally:
+        conn.close()
+
+
+PAGO_COLUMNS = ["id", "metodo_pago", "monto", "propina", "created_at"]
+
+
+def _pagos_divididos_out(conn, venta: dict) -> VentaCuentaDivididaOut:
+    rows = conn.run(
+        f"SELECT {', '.join(PAGO_COLUMNS)} FROM venta_pagos WHERE venta_id = :id ORDER BY created_at",
+        id=venta["id"],
+    )
+    pagos = [
+        VentaPagoOut(id=r[0], metodo_pago=r[1], monto=float(r[2]), propina=float(r[3]), created_at=r[4])
+        for r in rows
+    ]
+    total = float(venta["total"])
+    pagado = sum(p.monto for p in pagos)
+    return VentaCuentaDivididaOut(
+        venta_id=venta["id"], total=total, pagado=pagado, restante=max(0.0, round(total - pagado, 2)),
+        cerrada=venta["estado"] == "cerrada", pagos=pagos,
+    )
+
+
+@router.get("/ventas/{venta_id}/pagos", response_model=VentaCuentaDivididaOut)
+def listar_pagos_divididos(venta_id: int, current_user: UserOut = Depends(get_current_user)):
+    conn = get_connection()
+    try:
+        venta = _get_venta_or_404(conn, current_user.tenant_id, venta_id)
+        return _pagos_divididos_out(conn, venta)
+    finally:
+        conn.close()
+
+
+@router.post("/ventas/{venta_id}/pagos", response_model=VentaCuentaDivididaOut, status_code=status.HTTP_201_CREATED)
+def registrar_pago_dividido(
+    venta_id: int, payload: VentaPagoIn, current_user: UserOut = Depends(get_current_user)
+):
+    """Registra lo que pagó una persona de una cuenta dividida. Cuando la suma de los pagos
+    alcanza el total, la venta se cierra sola — mismo efecto final que /cobrar, pero en varios
+    pasos y permitiendo un método de pago distinto por persona."""
+    conn = get_connection()
+    try:
+        venta = _get_venta_or_404(conn, current_user.tenant_id, venta_id)
+        if venta["estado"] not in ACTIVOS:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Esta orden ya está cerrada")
+
+        items = conn.run(
+            "SELECT 1 FROM venta_items WHERE venta_id = :id AND receta_id IS NOT NULL LIMIT 1", id=venta_id
+        )
+        if not items:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La orden no tiene ítems para cobrar")
+
+        estado_actual = _pagos_divididos_out(conn, venta)
+        if payload.monto > estado_actual.restante + 0.01:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Ese monto supera lo que falta por pagar (restante: {estado_actual.restante})",
+            )
+
+        conn.run(
+            "INSERT INTO venta_pagos (venta_id, metodo_pago, monto, propina) VALUES (:id, :mp, :monto, :prop)",
+            id=venta_id, mp=payload.metodo_pago, monto=payload.monto, prop=payload.propina,
+        )
+
+        nuevo_estado = _pagos_divididos_out(conn, venta)
+        if nuevo_estado.restante <= 0.01:
+            pagos_rows = conn.run(
+                "SELECT metodo_pago, monto, propina FROM venta_pagos WHERE venta_id = :id", id=venta_id
+            )
+            metodos_usados = {r[0] for r in pagos_rows}
+            metodo_final = metodos_usados.pop() if len(metodos_usados) == 1 else "mixto"
+            propina_total = sum(float(r[2]) for r in pagos_rows)
+            pe = sum(float(r[1]) for r in pagos_rows if r[0] == "efectivo")
+            pt = sum(float(r[1]) for r in pagos_rows if r[0] == "tarjeta")
+            ptr = sum(float(r[1]) for r in pagos_rows if r[0] == "transferencia")
+
+            conn.run(
+                "UPDATE ventas SET estado = 'cerrada', fecha_cierre = now(), metodo_pago = :mp, "
+                "pago_efectivo = :pe, pago_tarjeta = :pt, pago_transferencia = :ptr, propina = :prop "
+                "WHERE id = :id",
+                mp=metodo_final, pe=pe, pt=pt, ptr=ptr, prop=propina_total, id=venta_id,
+            )
+            if venta["cupon_id"]:
+                conn.run("UPDATE cupones SET usos_actual = usos_actual + 1 WHERE id = :id", id=venta["cupon_id"])
+                conn.run(
+                    "UPDATE cupones SET estado = 'usado' WHERE id = :id AND usos_actual >= usos_max",
+                    id=venta["cupon_id"],
+                )
+                conn.run(
+                    "INSERT INTO cupones_usos (id_cupon, codigo, monto_descuento) VALUES (:id, :codigo, :monto)",
+                    id=venta["cupon_id"], codigo=venta["cupon_codigo"], monto=venta["descuento"],
+                )
+            _liberar_mesa_si_corresponde(conn, venta["mesa_id"])
+            venta = _get_venta_or_404(conn, current_user.tenant_id, venta_id)
+
+        return _pagos_divididos_out(conn, venta)
     finally:
         conn.close()
 

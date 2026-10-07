@@ -217,6 +217,30 @@ class VentaCuponIn(BaseModel):
     codigo: str = Field(min_length=1, max_length=8)
 
 
+class VentaPagoIn(BaseModel):
+    """Un pago parcial de una cuenta dividida: cada persona paga con un único método."""
+    metodo_pago: Literal["efectivo", "tarjeta", "transferencia"]
+    monto: float = Field(gt=0)
+    propina: float = Field(ge=0, default=0)
+
+
+class VentaPagoOut(BaseModel):
+    id: int
+    metodo_pago: Literal["efectivo", "tarjeta", "transferencia"]
+    monto: float
+    propina: float
+    created_at: datetime
+
+
+class VentaCuentaDivididaOut(BaseModel):
+    venta_id: int
+    total: float
+    pagado: float
+    restante: float
+    cerrada: bool
+    pagos: list[VentaPagoOut] = []
+
+
 class VentaCobrarIn(BaseModel):
     metodo_pago: MetodoPago = "efectivo"
     pago_efectivo: float = Field(ge=0, default=0)
