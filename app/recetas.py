@@ -15,6 +15,7 @@ from app.schemas import (
     RecetaIngredienteOut,
     RecetaOut,
     RecetaToppingOut,
+    RecetaToppingsUpdateIn,
     SaborOut,
 )
 
@@ -45,7 +46,7 @@ SABOR_DE_RECETA_SELECT = """
 """
 
 TOPPING_DE_RECETA_SELECT = """
-    SELECT t.id, t.nombre, t.activo, rt.precio_adicional
+    SELECT t.id, t.nombre, t.activo, rt.precio_adicional, t.foto_url
     FROM receta_toppings rt
     JOIN toppings t ON t.id = rt.id_topping
     WHERE rt.id_receta = :id_receta
@@ -173,7 +174,10 @@ def _get_sabores(conn, receta_id: int) -> list[SaborOut]:
 
 def _get_toppings(conn, receta_id: int) -> list[RecetaToppingOut]:
     rows = conn.run(TOPPING_DE_RECETA_SELECT, id_receta=receta_id)
-    return [RecetaToppingOut(id=r[0], nombre=r[1], activo=r[2], precio_adicional=float(r[3])) for r in rows]
+    return [
+        RecetaToppingOut(id=r[0], nombre=r[1], activo=r[2], precio_adicional=float(r[3]), foto_url=r[4])
+        for r in rows
+    ]
 
 
 def _row_to_receta(conn, row: dict) -> RecetaOut:
@@ -359,6 +363,22 @@ def update_receta(receta_id: int, payload: RecetaIn, current_user: UserOut = Dep
         _set_sabores(conn, current_user.tenant_id, receta_id, payload.sabores)
         _set_toppings(conn, current_user.tenant_id, receta_id, payload.toppings)
         return _row_to_receta(conn, _get_receta_or_404(conn, current_user.tenant_id, receta_id))
+    finally:
+        conn.close()
+
+
+@router.put("/{receta_id}/toppings", response_model=list[RecetaToppingOut])
+def set_receta_toppings(
+    receta_id: int, payload: RecetaToppingsUpdateIn, current_user: UserOut = Depends(get_current_user)
+):
+    """Reemplaza solo los toppings de esta receta — a diferencia de PUT /recetas/{id}, no toca
+    el resto del producto. Pensada para la página de Toppings: ahí se elige primero el producto
+    y luego se arman (o reutilizan) sus toppings, sin tener que reenviar la receta completa."""
+    conn = get_connection()
+    try:
+        _get_receta_or_404(conn, current_user.tenant_id, receta_id)
+        _set_toppings(conn, current_user.tenant_id, receta_id, payload.toppings)
+        return _get_toppings(conn, receta_id)
     finally:
         conn.close()
 

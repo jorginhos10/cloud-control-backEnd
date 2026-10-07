@@ -9,11 +9,11 @@ router = APIRouter(prefix="/toppings", dependencies=[Depends(get_current_user)])
 
 UNIQUE_VIOLATION = "23505"
 
-TOPPING_COLUMNS = ["id", "nombre", "activo"]
+TOPPING_COLUMNS = ["id", "nombre", "activo", "foto_url"]
 
 
 def _row_to_topping(row: dict) -> ToppingOut:
-    return ToppingOut(id=row["id"], nombre=row["nombre"], activo=row["activo"])
+    return ToppingOut(id=row["id"], nombre=row["nombre"], activo=row["activo"], foto_url=row["foto_url"])
 
 
 def toppings_por_receta(conn, receta_ids: list[int]) -> dict[int, list[RecetaToppingOut]]:
@@ -24,14 +24,16 @@ def toppings_por_receta(conn, receta_ids: list[int]) -> dict[int, list[RecetaTop
     if not receta_ids:
         return agrupado
     rows = conn.run(
-        "SELECT rt.id_receta, t.id, t.nombre, t.activo, rt.precio_adicional "
+        "SELECT rt.id_receta, t.id, t.nombre, t.activo, rt.precio_adicional, t.foto_url "
         "FROM receta_toppings rt JOIN toppings t ON t.id = rt.id_topping "
         "WHERE rt.id_receta = ANY(:ids) AND t.activo = true "
         "ORDER BY t.nombre",
         ids=receta_ids,
     )
     for r in rows:
-        agrupado[r[0]].append(RecetaToppingOut(id=r[1], nombre=r[2], activo=r[3], precio_adicional=float(r[4])))
+        agrupado[r[0]].append(
+            RecetaToppingOut(id=r[1], nombre=r[2], activo=r[3], precio_adicional=float(r[4]), foto_url=r[5])
+        )
     return agrupado
 
 
@@ -54,9 +56,9 @@ def create_topping(payload: ToppingIn, current_user: UserOut = Depends(get_curre
     try:
         try:
             rows = conn.run(
-                f"INSERT INTO toppings (usuario_id, nombre) VALUES (:uid, :nombre) "
+                f"INSERT INTO toppings (usuario_id, nombre, foto_url) VALUES (:uid, :nombre, :foto_url) "
                 f"RETURNING {', '.join(TOPPING_COLUMNS)}",
-                uid=current_user.tenant_id, nombre=payload.nombre.strip(),
+                uid=current_user.tenant_id, nombre=payload.nombre.strip(), foto_url=payload.foto_url,
             )
         except DatabaseError as exc:
             if exc.args and exc.args[0].get("C") == UNIQUE_VIOLATION:
@@ -73,9 +75,9 @@ def update_topping(topping_id: int, payload: ToppingIn, current_user: UserOut = 
     try:
         try:
             rows = conn.run(
-                f"UPDATE toppings SET nombre = :nombre WHERE id = :id AND usuario_id = :uid "
+                f"UPDATE toppings SET nombre = :nombre, foto_url = :foto_url WHERE id = :id AND usuario_id = :uid "
                 f"RETURNING {', '.join(TOPPING_COLUMNS)}",
-                id=topping_id, uid=current_user.tenant_id, nombre=payload.nombre.strip(),
+                id=topping_id, uid=current_user.tenant_id, nombre=payload.nombre.strip(), foto_url=payload.foto_url,
             )
         except DatabaseError as exc:
             if exc.args and exc.args[0].get("C") == UNIQUE_VIOLATION:

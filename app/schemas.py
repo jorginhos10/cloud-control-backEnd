@@ -269,6 +269,7 @@ class SaborOut(BaseModel):
 
 class ToppingIn(BaseModel):
     nombre: str = Field(min_length=1, max_length=80)
+    foto_url: Optional[str] = None
 
 
 class ToppingActivoIn(BaseModel):
@@ -279,6 +280,7 @@ class ToppingOut(BaseModel):
     id: int
     nombre: str
     activo: bool
+    foto_url: Optional[str] = None
 
 
 class RecetaToppingIn(BaseModel):
@@ -291,6 +293,11 @@ class RecetaToppingOut(BaseModel):
     nombre: str
     activo: bool
     precio_adicional: float
+    foto_url: Optional[str] = None
+
+
+class RecetaToppingsUpdateIn(BaseModel):
+    toppings: list[RecetaToppingIn] = []
 
 
 class CatalogoItemOut(BaseModel):
