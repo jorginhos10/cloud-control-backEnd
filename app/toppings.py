@@ -4,7 +4,7 @@ from pg8000.exceptions import DatabaseError
 from app.auth import UserOut, get_current_user
 from app.database import get_connection
 from app.imagenes import generar_thumbnail
-from app.schemas import RecetaToppingOut, ToppingActivoIn, ToppingIn, ToppingOut
+from app.schemas import RecetaToppingOut, ToppingActivoIn, ToppingIn, ToppingInsumoOut, ToppingOut
 
 router = APIRouter(prefix="/toppings", dependencies=[Depends(get_current_user)])
 
@@ -12,10 +12,58 @@ UNIQUE_VIOLATION = "23505"
 
 TOPPING_COLUMNS = ["id", "nombre", "activo", "foto_url", "foto_thumb_url"]
 
+INSUMO_DE_TOPPING_SELECT = """
+    SELECT ti.id_insumo, i.nombre, i.unidad_medida, ti.cantidad
+    FROM topping_insumos ti
+    JOIN insumos i ON i.id = ti.id_insumo
+    WHERE ti.id_topping = :id_topping
+    ORDER BY i.nombre
+"""
 
-def _row_to_topping(row: dict, thumbnail: bool = False) -> ToppingOut:
+
+def _get_insumos_topping(conn, topping_id: int) -> list[ToppingInsumoOut]:
+    rows = conn.run(INSUMO_DE_TOPPING_SELECT, id_topping=topping_id)
+    return [ToppingInsumoOut(id_insumo=r[0], insumo_nombre=r[1], unidad_medida=r[2], cantidad=float(r[3])) for r in rows]
+
+
+def _insumos_por_topping(conn, topping_ids: list[int]) -> dict[int, list[ToppingInsumoOut]]:
+    """Insumos de varios toppings en una sola consulta, agrupados por topping_id — usado por
+    list_toppings para no pedirlos topping por topping (evita el N+1 que ya resolvimos en recetas)."""
+    agrupado: dict[int, list[ToppingInsumoOut]] = {tid: [] for tid in topping_ids}
+    if not topping_ids:
+        return agrupado
+    rows = conn.run(
+        "SELECT ti.id_topping, ti.id_insumo, i.nombre, i.unidad_medida, ti.cantidad "
+        "FROM topping_insumos ti JOIN insumos i ON i.id = ti.id_insumo "
+        "WHERE ti.id_topping = ANY(:ids) ORDER BY i.nombre",
+        ids=topping_ids,
+    )
+    for r in rows:
+        agrupado[r[0]].append(ToppingInsumoOut(id_insumo=r[1], insumo_nombre=r[2], unidad_medida=r[3], cantidad=float(r[4])))
+    return agrupado
+
+
+def _set_insumos_topping(conn, usuario_id: int, topping_id: int, insumos: list) -> None:
+    conn.run("DELETE FROM topping_insumos WHERE id_topping = :id", id=topping_id)
+    vistos: set[int] = set()
+    for ins in insumos:
+        if ins.id_insumo in vistos:
+            continue
+        vistos.add(ins.id_insumo)
+        existe = conn.run(
+            "SELECT 1 FROM insumos WHERE id = :id AND usuario_id = :uid", id=ins.id_insumo, uid=usuario_id
+        )
+        if not existe:
+            continue
+        conn.run(
+            "INSERT INTO topping_insumos (id_topping, id_insumo, cantidad) VALUES (:topping, :insumo, :cantidad)",
+            topping=topping_id, insumo=ins.id_insumo, cantidad=ins.cantidad,
+        )
+
+
+def _row_to_topping(row: dict, insumos: list[ToppingInsumoOut], thumbnail: bool = False) -> ToppingOut:
     foto_url = (row["foto_thumb_url"] or row["foto_url"]) if thumbnail else row["foto_url"]
-    return ToppingOut(id=row["id"], nombre=row["nombre"], activo=row["activo"], foto_url=foto_url)
+    return ToppingOut(id=row["id"], nombre=row["nombre"], activo=row["activo"], foto_url=foto_url, insumos=insumos)
 
 
 def toppings_por_receta(conn, receta_ids: list[int]) -> dict[int, list[RecetaToppingOut]]:
@@ -48,7 +96,9 @@ def list_toppings(current_user: UserOut = Depends(get_current_user)):
             f"SELECT {', '.join(TOPPING_COLUMNS)} FROM toppings WHERE usuario_id = :uid ORDER BY nombre",
             uid=current_user.tenant_id,
         )
-        return [_row_to_topping(dict(zip(TOPPING_COLUMNS, r))) for r in rows]
+        toppings = [dict(zip(TOPPING_COLUMNS, r)) for r in rows]
+        insumos_map = _insumos_por_topping(conn, [t["id"] for t in toppings])
+        return [_row_to_topping(t, insumos_map[t["id"]]) for t in toppings]
     finally:
         conn.close()
 
@@ -69,7 +119,9 @@ def create_topping(payload: ToppingIn, current_user: UserOut = Depends(get_curre
             if exc.args and exc.args[0].get("C") == UNIQUE_VIOLATION:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya existe un topping con ese nombre")
             raise
-        return _row_to_topping(dict(zip(TOPPING_COLUMNS, rows[0])))
+        row = dict(zip(TOPPING_COLUMNS, rows[0]))
+        _set_insumos_topping(conn, current_user.tenant_id, row["id"], payload.insumos)
+        return _row_to_topping(row, _get_insumos_topping(conn, row["id"]))
     finally:
         conn.close()
 
@@ -92,7 +144,9 @@ def update_topping(topping_id: int, payload: ToppingIn, current_user: UserOut = 
             raise
         if not rows:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topping no encontrado")
-        return _row_to_topping(dict(zip(TOPPING_COLUMNS, rows[0])))
+        row = dict(zip(TOPPING_COLUMNS, rows[0]))
+        _set_insumos_topping(conn, current_user.tenant_id, topping_id, payload.insumos)
+        return _row_to_topping(row, _get_insumos_topping(conn, topping_id))
     finally:
         conn.close()
 
@@ -108,7 +162,8 @@ def toggle_activo(topping_id: int, payload: ToppingActivoIn, current_user: UserO
         )
         if not rows:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Topping no encontrado")
-        return _row_to_topping(dict(zip(TOPPING_COLUMNS, rows[0])))
+        row = dict(zip(TOPPING_COLUMNS, rows[0]))
+        return _row_to_topping(row, _get_insumos_topping(conn, topping_id))
     finally:
         conn.close()
 

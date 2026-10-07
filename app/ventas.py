@@ -498,6 +498,30 @@ def _consumo_de_receta(conn, receta_id: int, cantidad: float) -> dict[int, float
     return {id_insumo: float(cant_receta) * cantidad for id_insumo, cant_receta in filas}
 
 
+def _consumo_de_topping(conn, topping_id: int, cantidad: float) -> dict[int, float]:
+    """Cuánto de cada insumo necesitan `cantidad` unidades de este topping (ej. "Tocineta extra"
+    consume bacon real del inventario, igual que una receta)."""
+    filas = conn.run("SELECT id_insumo, cantidad FROM topping_insumos WHERE id_topping = :id", id=topping_id)
+    return {id_insumo: float(cant_topping) * cantidad for id_insumo, cant_topping in filas}
+
+
+def _sumar_consumo(a: dict[int, float], b: dict[int, float]) -> dict[int, float]:
+    """Combina dos consumos de insumos (ej. el de la receta base y el de su topping)."""
+    resultado = dict(a)
+    for id_insumo, cantidad in b.items():
+        resultado[id_insumo] = resultado.get(id_insumo, 0.0) + cantidad
+    return resultado
+
+
+def _consumo_de_item(conn, receta_id: int | None, topping_id: int | None, cantidad: float) -> dict[int, float]:
+    """Consumo total de un ítem de venta: insumos de la receta base más los del topping elegido,
+    si tiene uno."""
+    consumo = _consumo_de_receta(conn, receta_id, cantidad) if receta_id is not None else {}
+    if topping_id is not None:
+        consumo = _sumar_consumo(consumo, _consumo_de_topping(conn, topping_id, cantidad))
+    return consumo
+
+
 def _consumir_stock(conn, consumo: dict[int, float]) -> None:
     """Descuenta stock para estos insumos, bloqueando sus filas (FOR UPDATE) para que dos
     pedidos concurrentes por el mismo ingrediente no pasen ambos la validación antes de que
@@ -813,7 +837,7 @@ def agregar_item(venta_id: int, payload: VentaItemIn, current_user: UserOut = De
         # la receta para formar el precio unitario real de esta línea.
         precio_unitario = precio_venta + sabor_extra + topping_extra
 
-        consumo = _consumo_de_receta(conn, payload.receta_id, payload.cantidad)
+        consumo = _consumo_de_item(conn, payload.receta_id, payload.topping_id, payload.cantidad)
 
         conn.run("BEGIN")
         try:
@@ -879,19 +903,19 @@ def actualizar_cantidad_item(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Esta orden ya está cerrada")
 
         item = conn.run(
-            "SELECT receta_id, precio_unitario, cantidad FROM venta_items WHERE id = :iid AND venta_id = :vid",
+            "SELECT receta_id, topping_id, precio_unitario, cantidad FROM venta_items WHERE id = :iid AND venta_id = :vid",
             iid=item_id,
             vid=venta_id,
         )
         if not item:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ítem no encontrado")
-        receta_id, precio_unitario, cantidad_actual = item[0]
+        receta_id, topping_id, precio_unitario, cantidad_actual = item[0]
         delta = payload.cantidad - cantidad_actual
 
         conn.run("BEGIN")
         try:
-            if receta_id is not None and delta != 0:
-                consumo_delta = _consumo_de_receta(conn, receta_id, abs(delta))
+            if (receta_id is not None or topping_id is not None) and delta != 0:
+                consumo_delta = _consumo_de_item(conn, receta_id, topping_id, abs(delta))
                 if delta > 0:
                     _consumir_stock(conn, consumo_delta)
                 else:
@@ -922,18 +946,18 @@ def eliminar_item(venta_id: int, item_id: int, current_user: UserOut = Depends(g
     try:
         _get_venta_or_404(conn, current_user.tenant_id, venta_id)
         item = conn.run(
-            "SELECT receta_id, cantidad FROM venta_items WHERE id = :iid AND venta_id = :vid",
+            "SELECT receta_id, topping_id, cantidad FROM venta_items WHERE id = :iid AND venta_id = :vid",
             iid=item_id, vid=venta_id,
         )
         if not item:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ítem no encontrado")
-        receta_id, cantidad = item[0]
+        receta_id, topping_id, cantidad = item[0]
 
         conn.run("BEGIN")
         try:
             conn.run("DELETE FROM venta_items WHERE id = :iid AND venta_id = :vid", iid=item_id, vid=venta_id)
-            if receta_id is not None:
-                _restituir_stock(conn, _consumo_de_receta(conn, receta_id, cantidad))
+            if receta_id is not None or topping_id is not None:
+                _restituir_stock(conn, _consumo_de_item(conn, receta_id, topping_id, cantidad))
             _recalcular_total(conn, venta_id)
             conn.run("COMMIT")
         except Exception:
@@ -1118,15 +1142,16 @@ def cancelar_orden(venta_id: int, current_user: UserOut = Depends(get_current_us
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Esta orden ya está cerrada")
 
         items = conn.run(
-            "SELECT receta_id, cantidad FROM venta_items WHERE venta_id = :id AND receta_id IS NOT NULL",
+            "SELECT receta_id, topping_id, cantidad FROM venta_items WHERE venta_id = :id "
+            "AND (receta_id IS NOT NULL OR topping_id IS NOT NULL)",
             id=venta_id,
         )
         conn.run("BEGIN")
         try:
             # El stock de cada ítem se había reservado al agregarlo (incluso si cocina ya lo
             # preparó); cancelar la orden lo devuelve, sin importar en qué estado se cancele.
-            for receta_id, cantidad in items:
-                _restituir_stock(conn, _consumo_de_receta(conn, receta_id, cantidad))
+            for receta_id, topping_id, cantidad in items:
+                _restituir_stock(conn, _consumo_de_item(conn, receta_id, topping_id, cantidad))
             conn.run("UPDATE ventas SET estado = 'cancelada', fecha_cierre = now() WHERE id = :id", id=venta_id)
             conn.run("COMMIT")
         except Exception:

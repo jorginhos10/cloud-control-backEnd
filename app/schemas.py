@@ -286,9 +286,22 @@ class RecetaSaboresUpdateIn(BaseModel):
     sabores: list[RecetaSaborIn] = []
 
 
+class ToppingInsumoIn(BaseModel):
+    id_insumo: int
+    cantidad: float = Field(gt=0)
+
+
+class ToppingInsumoOut(BaseModel):
+    id_insumo: int
+    insumo_nombre: str
+    unidad_medida: str
+    cantidad: float
+
+
 class ToppingIn(BaseModel):
     nombre: str = Field(min_length=1, max_length=80)
     foto_url: Optional[str] = None
+    insumos: list[ToppingInsumoIn] = []
 
 
 class ToppingActivoIn(BaseModel):
@@ -300,6 +313,7 @@ class ToppingOut(BaseModel):
     nombre: str
     activo: bool
     foto_url: Optional[str] = None
+    insumos: list[ToppingInsumoOut] = []
 
 
 class RecetaToppingIn(BaseModel):
