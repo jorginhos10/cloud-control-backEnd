@@ -181,8 +181,71 @@ def _get_toppings(conn, receta_id: int) -> list[RecetaToppingOut]:
     ]
 
 
-def _row_to_receta(conn, row: dict) -> RecetaOut:
-    ingredientes = _get_ingredientes(conn, row["id"])
+def _ingredientes_por_receta(conn, receta_ids: list[int]) -> dict[int, list[RecetaIngredienteOut]]:
+    """Ingredientes de varias recetas en una sola consulta, agrupados por receta_id — usado por
+    list_recetas para no pedirlos receta por receta (evita el N+1 que hacía lento el listado)."""
+    agrupado: dict[int, list[RecetaIngredienteOut]] = {rid: [] for rid in receta_ids}
+    if not receta_ids:
+        return agrupado
+    rows = conn.run(
+        "SELECT ri.id_receta, ri.id_insumo, i.nombre, i.unidad_medida, ri.cantidad, i.precio_unitario "
+        "FROM receta_insumos ri JOIN insumos i ON i.id = ri.id_insumo "
+        "WHERE ri.id_receta = ANY(:ids) ORDER BY i.nombre",
+        ids=receta_ids,
+    )
+    for r in rows:
+        agrupado[r[0]].append(
+            RecetaIngredienteOut(
+                id_insumo=r[1], insumo_nombre=r[2], unidad_medida=r[3],
+                cantidad=float(r[4]), costo=round(float(r[4]) * float(r[5]), 2),
+            )
+        )
+    return agrupado
+
+
+def _sabores_por_receta_admin(conn, receta_ids: list[int]) -> dict[int, list[RecetaSaborOut]]:
+    """Igual que _get_sabores pero para varias recetas en una sola consulta. A diferencia de
+    sabores_por_receta() (en app.sabores, usada por el catálogo de pedidos), no filtra por activo:
+    las páginas de administración necesitan ver también los sabores desactivados que sigan asociados."""
+    agrupado: dict[int, list[RecetaSaborOut]] = {rid: [] for rid in receta_ids}
+    if not receta_ids:
+        return agrupado
+    rows = conn.run(
+        "SELECT rs.id_receta, s.id, s.nombre, s.activo, rs.precio_adicional "
+        "FROM receta_sabores rs JOIN sabores s ON s.id = rs.id_sabor "
+        "WHERE rs.id_receta = ANY(:ids) ORDER BY s.nombre",
+        ids=receta_ids,
+    )
+    for r in rows:
+        agrupado[r[0]].append(RecetaSaborOut(id=r[1], nombre=r[2], activo=r[3], precio_adicional=float(r[4])))
+    return agrupado
+
+
+def _toppings_por_receta_admin(conn, receta_ids: list[int]) -> dict[int, list[RecetaToppingOut]]:
+    """Igual que _get_toppings pero para varias recetas en una sola consulta (ver nota de
+    _sabores_por_receta_admin sobre por qué no reutiliza la versión filtrada por activo)."""
+    agrupado: dict[int, list[RecetaToppingOut]] = {rid: [] for rid in receta_ids}
+    if not receta_ids:
+        return agrupado
+    rows = conn.run(
+        "SELECT rt.id_receta, t.id, t.nombre, t.activo, rt.precio_adicional, t.foto_url "
+        "FROM receta_toppings rt JOIN toppings t ON t.id = rt.id_topping "
+        "WHERE rt.id_receta = ANY(:ids) ORDER BY t.nombre",
+        ids=receta_ids,
+    )
+    for r in rows:
+        agrupado[r[0]].append(
+            RecetaToppingOut(id=r[1], nombre=r[2], activo=r[3], precio_adicional=float(r[4]), foto_url=r[5])
+        )
+    return agrupado
+
+
+def _build_receta_out(
+    row: dict,
+    ingredientes: list[RecetaIngredienteOut],
+    sabores: list[RecetaSaborOut],
+    toppings: list[RecetaToppingOut],
+) -> RecetaOut:
     costo_total = round(sum(i.costo for i in ingredientes), 2)
     precio_venta = float(row["precio_venta"])
     return RecetaOut(
@@ -190,10 +253,14 @@ def _row_to_receta(conn, row: dict) -> RecetaOut:
         categoria=row["categoria_key"], tiempo_preparacion=row["tiempo_preparacion"],
         porciones=row["porciones"], precio_venta=precio_venta, activo=row["activo"],
         created_at=row["created_at"], imagen_url=row["imagen_url"],
-        ingredientes=ingredientes, sabores=_get_sabores(conn, row["id"]),
-        toppings=_get_toppings(conn, row["id"]), costo_total=costo_total,
-        margen=round(precio_venta - costo_total, 2),
+        ingredientes=ingredientes, sabores=sabores, toppings=toppings,
+        costo_total=costo_total, margen=round(precio_venta - costo_total, 2),
     )
+
+
+def _row_to_receta(conn, row: dict) -> RecetaOut:
+    receta_id = row["id"]
+    return _build_receta_out(row, _get_ingredientes(conn, receta_id), _get_sabores(conn, receta_id), _get_toppings(conn, receta_id))
 
 
 @router.get("", response_model=list[RecetaOut])
@@ -213,7 +280,18 @@ def list_recetas(q: str = Query(default=""), current_user: UserOut = Depends(get
             rows = conn.run(
                 _receta_select("WHERE recetas.usuario_id = :uid ORDER BY recetas.nombre"), uid=current_user.tenant_id
             )
-        return [_row_to_receta(conn, dict(zip(RECETA_COLUMNS, r))) for r in rows]
+        # Trae ingredientes/sabores/toppings de TODAS las recetas en 3 consultas en vez de 3 por
+        # receta (antes era 1+3N consultas — con 60-100 productos eso eran 200+ idas y vueltas a
+        # la base de datos, la causa de que Toppings/Sabores/Recetas tardaran en cargar).
+        recetas = [dict(zip(RECETA_COLUMNS, r)) for r in rows]
+        receta_ids = [r["id"] for r in recetas]
+        ingredientes_map = _ingredientes_por_receta(conn, receta_ids)
+        sabores_map = _sabores_por_receta_admin(conn, receta_ids)
+        toppings_map = _toppings_por_receta_admin(conn, receta_ids)
+        return [
+            _build_receta_out(r, ingredientes_map[r["id"]], sabores_map[r["id"]], toppings_map[r["id"]])
+            for r in recetas
+        ]
     finally:
         conn.close()
 
