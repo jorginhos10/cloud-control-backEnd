@@ -297,8 +297,8 @@ def enviar(current_user: UserOut = Depends(get_current_user_any_status)):
             faltantes.append("Datos del comercio")
         if estado.plan_solicitado_id is None:
             faltantes.append("Selección del plan")
-        cargados = {d.tipo for d in estado.documentos}
-        faltantes += [etiqueta for tipo, etiqueta in REQUIRED_DOCS if tipo not in cargados]
+        # Los documentos (REQUIRED_DOCS) ya no bloquean el envío: el comercio puede omitirlos y
+        # cargarlos después si el SuperAdmin los pide al revisar la solicitud.
         if faltantes:
             raise HTTPException(status_code=422, detail="Para enviar tu solicitud falta: " + ", ".join(faltantes))
         rechazados = [DOC_LABELS[d.tipo] for d in estado.documentos if d.estado == "rechazado"]
