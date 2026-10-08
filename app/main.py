@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.activos_fijos import router as activos_fijos_router
+from app.analytics import router as analytics_router
 from app.apariencia_login import router as apariencia_login_router
 from app.aplicativos_publico import router as aplicativos_publico_router
 from app.auth import router as auth_router
@@ -58,6 +59,7 @@ app.add_middleware(
 
 
 app.include_router(auth_router)
+app.include_router(analytics_router)
 app.include_router(apariencia_login_router)
 app.include_router(aplicativos_publico_router)
 app.include_router(activos_fijos_router)

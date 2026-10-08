@@ -377,6 +377,10 @@ class NegocioPublicoOut(BaseModel):
     apariencia: str = "violet-original"
 
 
+class VisitaIn(BaseModel):
+    ruta: str = Field(default="", max_length=200)
+
+
 class CocinaItemOut(BaseModel):
     id: int
     nombre: str
