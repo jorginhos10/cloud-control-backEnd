@@ -21,6 +21,7 @@ from app.database import get_connection
 from app.domicilio_publico import router as domicilio_publico_router
 from app.domicilios import router as domicilios_router
 from app.facturacion_electronica import router as facturacion_electronica_router
+from app.gastos import router as gastos_router
 from app.ingresos import router as ingresos_router
 from app.insumos import router as insumos_router
 from app.mesas import router as mesas_router
@@ -74,6 +75,7 @@ app.include_router(recetas_router)
 app.include_router(sabores_router)
 app.include_router(toppings_router)
 app.include_router(ingresos_router)
+app.include_router(gastos_router)
 app.include_router(menu_digital_router)
 app.include_router(negocios_router)
 app.include_router(onboarding_router)

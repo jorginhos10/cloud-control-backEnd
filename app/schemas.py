@@ -562,6 +562,31 @@ class ActivoFijoHistorialOut(BaseModel):
     created_at: datetime
 
 
+class GastoIn(BaseModel):
+    concepto: str = Field(min_length=1, max_length=150)
+    categoria: str = Field(default="otros", max_length=60)
+    monto: float = Field(ge=0, default=0)
+    fecha: date
+    nota: str = Field(default="", max_length=500)
+
+
+class GastoOut(BaseModel):
+    id: int
+    concepto: str
+    categoria: str
+    monto: float
+    fecha: date
+    nota: str
+    created_at: datetime
+
+
+class GastoEstadisticasOut(BaseModel):
+    total_registrados: int
+    total_monto: float
+    mes_monto: float
+    categorias: int
+
+
 class CategoriaRecetaIn(BaseModel):
     label: str = Field(min_length=1, max_length=100)
 

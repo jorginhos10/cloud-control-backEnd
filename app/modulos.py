@@ -41,6 +41,7 @@ RUTAS_MODULO: list[tuple] = [
     ("/activos-fijos", ("inventario-inmobiliario",)),
     ("/proveedores", ("proveedores",)),
     ("/ingresos", ("ingresos",)),
+    ("/gastos", ("gastos",)),
     ("/perdidas", ("perdidas",)),
     ("/reportes", ("reportes",)),
     ("/chat-soporte", ("chat",)),
