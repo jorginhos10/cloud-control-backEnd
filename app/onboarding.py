@@ -16,7 +16,7 @@ from app.schemas import (
     PlanPublicoOut,
     UserOut,
 )
-from app.suscripcion import _fetch_plan_disponible, listar_planes_disponibles
+from app.suscripcion import _fetch_plan_by_id, _fetch_plan_disponible, listar_planes_disponibles
 
 router = APIRouter(prefix="/onboarding", tags=["onboarding"])
 
@@ -69,6 +69,23 @@ def _tipos_comercio_habilitados() -> list[str]:
         return tipos or ["Store", "Restobar"]
     except Exception:
         return ["Store", "Restobar"]
+    finally:
+        sconn.close()
+
+
+def _autoaceptar_habilitado() -> bool:
+    """El SuperAdmin puede activar que un comercio nuevo quede aprobado de una vez al enviar su
+    registro, sin pasar por la cola de revisión manual. Falla a False (revisión manual) si la
+    base del SuperAdmin no responde — nunca se autoaprueba "por accidente"."""
+    try:
+        sconn = get_superadmin_connection()
+    except Exception:
+        return False
+    try:
+        rows = sconn.run("SELECT autoaceptar_registros FROM ajustes_generales WHERE id = 1")
+        return bool(rows[0][0]) if rows else False
+    except Exception:
+        return False
     finally:
         sconn.close()
 
@@ -308,13 +325,36 @@ def enviar(current_user: UserOut = Depends(get_current_user_any_status)):
                 detail="Reemplaza los documentos rechazados antes de reenviar: " + ", ".join(rechazados),
             )
 
+        # El SuperAdmin puede activar "autoaceptar": el comercio queda aprobado de una vez, sin
+        # pasar por la cola de revisión manual (mismo efecto que si alguien lo aprobara a mano).
+        autoaceptar = _autoaceptar_habilitado()
+        nuevo_estado = "aprobado" if autoaceptar else "pendiente_aprobacion"
+        extra_sql = ", verificado = true" if autoaceptar else ""
         updated = conn.run(
-            "UPDATE usuarios SET estado_aprobacion = 'pendiente_aprobacion', motivo_rechazo = '' "
+            f"UPDATE usuarios SET estado_aprobacion = :estado, motivo_rechazo = ''{extra_sql} "
             "WHERE id = :id AND estado_aprobacion IN ('pendiente_datos', 'rechazado') RETURNING id",
-            id=current_user.id,
+            estado=nuevo_estado, id=current_user.id,
         )
         if not updated:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Tu solicitud ya fue enviada")
+
+        # Igual que una aprobación manual: un plan gratis solicitado se activa de una vez. Uno de
+        # pago sigue necesitando el checkout real en Suscripción, nunca se regala por esta vía.
+        if autoaceptar and estado.plan_solicitado_id is not None:
+            try:
+                sconn = get_superadmin_connection()
+                try:
+                    plan = _fetch_plan_by_id(sconn, estado.plan_solicitado_id)
+                finally:
+                    sconn.close()
+                if plan and float(plan[4]) <= 0:
+                    conn.run(
+                        "UPDATE usuarios SET plan_id = :pid, plan_actualizado_en = now() WHERE id = :id",
+                        pid=plan[0], id=current_user.id,
+                    )
+            except Exception:
+                pass  # el comercio queda aprobado igual; el plan gratis se puede activar luego desde Suscripción
+
         return _estado_completo(conn, current_user.id)
     finally:
         conn.close()
