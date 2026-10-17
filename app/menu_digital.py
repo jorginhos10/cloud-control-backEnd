@@ -43,7 +43,7 @@ MENU_ITEMS_SELECT = """
     JOIN recetas r ON r.id = mi.receta_id
     JOIN receta_categorias rc ON rc.id = r.categoria_id
     WHERE mi.menu_id = :id AND r.activo = true
-    ORDER BY mi.orden
+    ORDER BY rc.orden, mi.orden
 """
 
 

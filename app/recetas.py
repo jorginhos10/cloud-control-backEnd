@@ -10,6 +10,7 @@ from app.imagenes import generar_thumbnail
 from app.schemas import (
     CategoriaRecetaIn,
     CategoriaRecetaOut,
+    CategoriasRecetaOrdenIn,
     RecetaActivoIn,
     RecetaEstadisticasOut,
     RecetaIn,
@@ -112,6 +113,33 @@ def create_categoria(payload: CategoriaRecetaIn, current_user: UserOut = Depends
             orden=max_orden + 1,
         )
         return _row_to_categoria(dict(zip(CATEGORIA_COLUMNS, rows[0])))
+    finally:
+        conn.close()
+
+
+@router.put("/categorias/orden", response_model=list[CategoriaRecetaOut])
+def reordenar_categorias(payload: CategoriasRecetaOrdenIn, current_user: UserOut = Depends(get_current_user)):
+    """Guarda el nuevo orden de las categorías (arrastradas en la UI). Ese orden es el que se usa
+    para agruparlas en Salón, Venta Directa, Domicilios y Menú Digital."""
+    conn = get_connection()
+    try:
+        propias = {
+            r[0] for r in conn.run(
+                "SELECT id FROM receta_categorias WHERE usuario_id = :uid", uid=current_user.tenant_id
+            )
+        }
+        if set(payload.orden) != propias:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La lista debe incluir todas tus categorías, sin repetir")
+        for posicion, categoria_id in enumerate(payload.orden):
+            conn.run(
+                "UPDATE receta_categorias SET orden = :orden WHERE id = :id AND usuario_id = :uid",
+                orden=posicion, id=categoria_id, uid=current_user.tenant_id,
+            )
+        rows = conn.run(
+            f"SELECT {', '.join(CATEGORIA_COLUMNS)} FROM receta_categorias WHERE usuario_id = :uid ORDER BY orden, id",
+            uid=current_user.tenant_id,
+        )
+        return [_row_to_categoria(dict(zip(CATEGORIA_COLUMNS, r))) for r in rows]
     finally:
         conn.close()
 

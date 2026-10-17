@@ -42,7 +42,7 @@ CATALOGO_SELECT = """
     FROM recetas
     JOIN receta_categorias ON receta_categorias.id = recetas.categoria_id
     WHERE recetas.usuario_id = :uid AND recetas.activo = true
-    ORDER BY recetas.nombre
+    ORDER BY receta_categorias.orden, recetas.nombre
 """
 
 

@@ -205,11 +205,13 @@ def catalogo(q: str = Query(default=""), current_user: UserOut = Depends(get_cur
         texto = q.strip()
         if texto:
             rows = conn.run(
-                CATALOGO_SELECT + " AND recetas.nombre ILIKE :q ORDER BY recetas.nombre",
+                CATALOGO_SELECT + " AND recetas.nombre ILIKE :q ORDER BY receta_categorias.orden, recetas.nombre",
                 uid=current_user.tenant_id, q=f"%{texto}%",
             )
         else:
-            rows = conn.run(CATALOGO_SELECT + " ORDER BY recetas.nombre", uid=current_user.tenant_id)
+            rows = conn.run(
+                CATALOGO_SELECT + " ORDER BY receta_categorias.orden, recetas.nombre", uid=current_user.tenant_id
+            )
         sabores = sabores_por_receta(conn, [r[0] for r in rows])
         toppings = toppings_por_receta(conn, [r[0] for r in rows])
         return [

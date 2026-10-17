@@ -597,6 +597,10 @@ class CategoriaRecetaOut(BaseModel):
     label: str
 
 
+class CategoriasRecetaOrdenIn(BaseModel):
+    orden: list[int] = Field(min_length=1)
+
+
 class RecetaIngredienteIn(BaseModel):
     id_insumo: int
     cantidad: float = Field(gt=0)
