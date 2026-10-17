@@ -6,6 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from app.auth import UserOut, get_current_user, require_roles
 from app.database import get_connection
 from app.schemas import (
+    CierreAutomaticoIn,
+    CierreAutomaticoOut,
     CierreZMesOut,
     CierreZOut,
     CierreZPreviewOut,
@@ -181,32 +183,66 @@ def grafica_mensual_z(anio: int = Query(default=0), current_user: UserOut = Depe
         conn.close()
 
 
+def generar_cierre(conn, usuario_id: int, automatico: bool = False) -> CierreZOut:
+    """Núcleo de la generación de un cierre Z, compartido por el botón manual y por el
+    scheduler del cierre automático (ver app/scheduler.py)."""
+    desde = _fecha_desde_pendiente(conn, usuario_id)
+    hasta = datetime.now()
+    total_ventas, total_monto, por_producto = _calcular_periodo(conn, usuario_id, desde, hasta)
+
+    numero = conn.run(
+        "SELECT COALESCE(MAX(numero_z), 0) + 1 FROM cierres_z WHERE usuario_id = :uid", uid=usuario_id
+    )[0][0]
+
+    datos_json = json.dumps({"por_producto": [p.model_dump() for p in por_producto]})
+    rows = conn.run(
+        "INSERT INTO cierres_z "
+        "(usuario_id, numero_z, fecha_desde, fecha_hasta, total_ventas, total_monto, datos_json, automatico) "
+        "VALUES (:uid, :num, :desde, :hasta, :tv, :tm, :datos, :auto) "
+        "RETURNING id, numero_z, fecha_desde, fecha_hasta, total_ventas, total_monto, created_at",
+        uid=usuario_id, num=numero, desde=desde, hasta=hasta,
+        tv=total_ventas, tm=total_monto, datos=datos_json, auto=automatico,
+    )
+    r = rows[0]
+    return CierreZOut(
+        id=r[0], numero_z=r[1], fecha_desde=r[2], fecha_hasta=r[3],
+        total_ventas=r[4], total_monto=float(r[5]), por_producto=por_producto, created_at=r[6],
+    )
+
+
 @router.post("/z/generar", response_model=CierreZOut, status_code=status.HTTP_201_CREATED)
 def generar_cierre_z(current_user: UserOut = Depends(get_current_user)):
     conn = get_connection()
     try:
-        desde = _fecha_desde_pendiente(conn, current_user.tenant_id)
-        hasta = datetime.now()
-        total_ventas, total_monto, por_producto = _calcular_periodo(conn, current_user.tenant_id, desde, hasta)
+        return generar_cierre(conn, current_user.tenant_id, automatico=False)
+    finally:
+        conn.close()
 
-        numero = conn.run(
-            "SELECT COALESCE(MAX(numero_z), 0) + 1 FROM cierres_z WHERE usuario_id = :uid", uid=current_user.tenant_id
-        )[0][0]
 
-        datos_json = json.dumps({"por_producto": [p.model_dump() for p in por_producto]})
+@router.get("/z/automatico", response_model=CierreAutomaticoOut)
+def get_cierre_automatico(current_user: UserOut = Depends(get_current_user)):
+    conn = get_connection()
+    try:
         rows = conn.run(
-            "INSERT INTO cierres_z "
-            "(usuario_id, numero_z, fecha_desde, fecha_hasta, total_ventas, total_monto, datos_json) "
-            "VALUES (:uid, :num, :desde, :hasta, :tv, :tm, :datos) "
-            "RETURNING id, numero_z, fecha_desde, fecha_hasta, total_ventas, total_monto, created_at",
-            uid=current_user.tenant_id, num=numero, desde=desde, hasta=hasta,
-            tv=total_ventas, tm=total_monto, datos=datos_json,
+            "SELECT cierre_automatico_activo, cierre_automatico_hora FROM negocios WHERE usuario_id = :uid",
+            uid=current_user.tenant_id,
         )
-        r = rows[0]
-        return CierreZOut(
-            id=r[0], numero_z=r[1], fecha_desde=r[2], fecha_hasta=r[3],
-            total_ventas=r[4], total_monto=float(r[5]), por_producto=por_producto, created_at=r[6],
+        if not rows:
+            return CierreAutomaticoOut(activo=False, hora=23)
+        return CierreAutomaticoOut(activo=rows[0][0], hora=rows[0][1])
+    finally:
+        conn.close()
+
+
+@router.put("/z/automatico", response_model=CierreAutomaticoOut)
+def set_cierre_automatico(payload: CierreAutomaticoIn, current_user: UserOut = Depends(get_current_user)):
+    conn = get_connection()
+    try:
+        conn.run(
+            "UPDATE negocios SET cierre_automatico_activo = :activo, cierre_automatico_hora = :hora WHERE usuario_id = :uid",
+            activo=payload.activo, hora=payload.hora, uid=current_user.tenant_id,
         )
+        return CierreAutomaticoOut(activo=payload.activo, hora=payload.hora)
     finally:
         conn.close()
 

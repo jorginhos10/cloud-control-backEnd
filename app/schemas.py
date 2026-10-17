@@ -1055,6 +1055,16 @@ class CierreZMesOut(BaseModel):
     total_ventas: int
 
 
+class CierreAutomaticoIn(BaseModel):
+    activo: bool
+    hora: int = Field(ge=0, le=23)
+
+
+class CierreAutomaticoOut(BaseModel):
+    activo: bool
+    hora: int
+
+
 EstadoListaCompra = Literal["pendiente", "recibido", "cancelado"]
 
 

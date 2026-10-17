@@ -97,6 +97,17 @@ app.include_router(suscripcion_router)
 app.include_router(soporte_router)
 
 
+@app.on_event("startup")
+def iniciar_scheduler() -> None:
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    from app.scheduler import ejecutar_cierres_automaticos
+
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(ejecutar_cierres_automaticos, "cron", minute="*", id="cierres_automaticos")
+    scheduler.start()
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
