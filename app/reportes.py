@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
@@ -12,10 +12,14 @@ from app.schemas import (
     CierreZOut,
     CierreZPreviewOut,
     CierreZResumenOut,
+    ComparacionOut,
+    ComparacionPeriodoOut,
     ReporteXGeneralOut,
     ReporteXHoraOut,
     ReporteXOut,
     ReporteXProductoOut,
+    SerieBucketOut,
+    SerieOut,
 )
 
 # Reportes financieros: solo propietario o staff "admin", nunca mesero/cocina/inventario.
@@ -264,6 +268,113 @@ def get_cierre_z(cierre_id: int, current_user: UserOut = Depends(get_current_use
         return CierreZOut(
             id=r[0], numero_z=r[1], fecha_desde=r[2], fecha_hasta=r[3],
             total_ventas=r[4], total_monto=float(r[5]), por_producto=por_producto, created_at=r[7],
+        )
+    finally:
+        conn.close()
+
+
+# --- Reportes avanzados: series y comparaciones por rango de fechas -----------------------------
+
+_UNIDAD = {"dia": "day", "semana": "week", "mes": "month"}
+_MAX_BUCKETS = 400
+
+
+@router.get("/serie", response_model=SerieOut)
+def serie_ventas(
+    granularidad: str = Query(default="dia"),
+    desde: date = Query(),
+    hasta: date = Query(),
+    current_user: UserOut = Depends(get_current_user),
+):
+    """Ventas cerradas agrupadas por día, semana (lunes a domingo) o mes; los periodos sin ventas salen en cero."""
+    unidad = _UNIDAD.get(granularidad)
+    if unidad is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Granularidad inválida")
+    if hasta < desde:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La fecha final es anterior a la inicial")
+    dias = (hasta - desde).days + 1
+    if dias > 800:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El rango no puede superar 800 días")
+
+    conn = get_connection()
+    try:
+        # `unidad` sale de una lista fija, no del usuario, así que es seguro interpolarla.
+        rows = conn.run(
+            f"SELECT g.d::date, COUNT(v.id), COALESCE(SUM(v.total), 0), COALESCE(SUM(v.propina), 0) "
+            f"FROM generate_series(date_trunc('{unidad}', CAST(:desde AS timestamp)), "
+            f"CAST(:hasta AS timestamp), interval '1 {unidad}') AS g(d) "
+            f"LEFT JOIN ventas v ON v.usuario_id = :uid AND v.estado = 'cerrada' "
+            f"AND v.fecha_cierre >= g.d AND v.fecha_cierre < g.d + interval '1 {unidad}' "
+            f"GROUP BY g.d ORDER BY g.d",
+            uid=current_user.tenant_id, desde=desde, hasta=hasta,
+        )
+        if len(rows) > _MAX_BUCKETS:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Demasiados periodos; acorta el rango")
+        return SerieOut(
+            granularidad=granularidad,
+            buckets=[
+                SerieBucketOut(
+                    inicio=r[0], ventas=int(r[1]), monto=float(r[2]), propinas=float(r[3]),
+                    ticket_promedio=float(r[2]) / int(r[1]) if r[1] else 0.0,
+                )
+                for r in rows
+            ],
+        )
+    finally:
+        conn.close()
+
+
+def _resumen_rango(conn, usuario_id: int, desde: date, hasta: date) -> ComparacionPeriodoOut:
+    # `hasta` es un día completo: se compara contra el inicio del día siguiente.
+    ini = datetime.combine(desde, time.min)
+    fin = datetime.combine(hasta, time.min) + timedelta(days=1)
+    g = conn.run(
+        "SELECT COUNT(*), COALESCE(SUM(total), 0), COALESCE(SUM(propina), 0) FROM ventas "
+        "WHERE usuario_id = :uid AND estado = 'cerrada' AND fecha_cierre >= :ini AND fecha_cierre < :fin",
+        uid=usuario_id, ini=ini, fin=fin,
+    )[0]
+    platos = conn.run(
+        "SELECT COALESCE(SUM(vi.cantidad), 0) FROM venta_items vi JOIN ventas v ON v.id = vi.venta_id "
+        "WHERE v.usuario_id = :uid AND v.estado = 'cerrada' AND v.fecha_cierre >= :ini AND v.fecha_cierre < :fin",
+        uid=usuario_id, ini=ini, fin=fin,
+    )[0][0]
+    prods = conn.run(
+        "SELECT vi.receta_id, vi.nombre, COALESCE(rc.label, 'Otro'), SUM(vi.cantidad), SUM(vi.subtotal) "
+        "FROM venta_items vi JOIN ventas v ON v.id = vi.venta_id "
+        "LEFT JOIN recetas r ON r.id = vi.receta_id LEFT JOIN receta_categorias rc ON rc.id = r.categoria_id "
+        "WHERE v.usuario_id = :uid AND v.estado = 'cerrada' AND v.fecha_cierre >= :ini AND v.fecha_cierre < :fin "
+        "GROUP BY vi.receta_id, vi.nombre, rc.label ORDER BY SUM(vi.cantidad) DESC LIMIT 5",
+        uid=usuario_id, ini=ini, fin=fin,
+    )
+    ventas = int(g[0])
+    return ComparacionPeriodoOut(
+        desde=desde, hasta=hasta, ventas=ventas, monto=float(g[1]), propinas=float(g[2]),
+        ticket_promedio=float(g[1]) / ventas if ventas else 0.0, platos=int(platos),
+        top_productos=[
+            ReporteXProductoOut(receta_id=p[0], nombre=p[1], categoria=p[2], cantidad=int(p[3]), monto=float(p[4]))
+            for p in prods
+        ],
+    )
+
+
+@router.get("/comparar", response_model=ComparacionOut)
+def comparar_periodos(
+    a_desde: date = Query(),
+    a_hasta: date = Query(),
+    b_desde: date = Query(),
+    b_hasta: date = Query(),
+    current_user: UserOut = Depends(get_current_user),
+):
+    """Totales y top de productos de dos rangos de fechas, para ponerlos lado a lado."""
+    if a_hasta < a_desde or b_hasta < b_desde:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La fecha final es anterior a la inicial")
+    if (a_hasta - a_desde).days > 800 or (b_hasta - b_desde).days > 800:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="El rango no puede superar 800 días")
+    conn = get_connection()
+    try:
+        return ComparacionOut(
+            a=_resumen_rango(conn, current_user.tenant_id, a_desde, a_hasta),
+            b=_resumen_rango(conn, current_user.tenant_id, b_desde, b_hasta),
         )
     finally:
         conn.close()

@@ -1677,3 +1677,32 @@ class NominaDetalleUpdateIn(BaseModel):
     salud: float = Field(ge=0, default=0)
     pension: float = Field(ge=0, default=0)
     notas: str = Field(default="", max_length=300)
+
+
+class SerieBucketOut(BaseModel):
+    inicio: date
+    ventas: int
+    monto: float
+    propinas: float
+    ticket_promedio: float
+
+
+class SerieOut(BaseModel):
+    granularidad: Literal["dia", "semana", "mes"]
+    buckets: list[SerieBucketOut]
+
+
+class ComparacionPeriodoOut(BaseModel):
+    desde: date
+    hasta: date
+    ventas: int
+    monto: float
+    propinas: float
+    ticket_promedio: float
+    platos: int
+    top_productos: list[ReporteXProductoOut]
+
+
+class ComparacionOut(BaseModel):
+    a: ComparacionPeriodoOut
+    b: ComparacionPeriodoOut
