@@ -1706,3 +1706,14 @@ class ComparacionPeriodoOut(BaseModel):
 class ComparacionOut(BaseModel):
     a: ComparacionPeriodoOut
     b: ComparacionPeriodoOut
+
+
+class VentaPeriodoOut(BaseModel):
+    id: int
+    fecha: datetime
+    tipo: Optional[str] = None
+    mesa_numero: Optional[int] = None
+    metodo_pago: Optional[str] = None
+    propina: float
+    total: float
+    items: str = ""

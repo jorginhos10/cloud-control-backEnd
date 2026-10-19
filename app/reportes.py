@@ -20,6 +20,7 @@ from app.schemas import (
     ReporteXProductoOut,
     SerieBucketOut,
     SerieOut,
+    VentaPeriodoOut,
 )
 
 # Reportes financieros: solo propietario o staff "admin", nunca mesero/cocina/inventario.
@@ -376,5 +377,40 @@ def comparar_periodos(
             a=_resumen_rango(conn, current_user.tenant_id, a_desde, a_hasta),
             b=_resumen_rango(conn, current_user.tenant_id, b_desde, b_hasta),
         )
+    finally:
+        conn.close()
+
+
+@router.get("/ventas-periodo", response_model=list[VentaPeriodoOut])
+def ventas_periodo(
+    granularidad: str = Query(default="dia"),
+    inicio: date = Query(),
+    current_user: UserOut = Depends(get_current_user),
+):
+    """Las ventas cerradas que componen un día, una semana o un mes de la serie (las más recientes primero)."""
+    unidad = _UNIDAD.get(granularidad)
+    if unidad is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Granularidad inválida")
+    conn = get_connection()
+    try:
+        # `unidad` sale de una lista fija, no del usuario, así que es seguro interpolarla.
+        rows = conn.run(
+            f"SELECT v.id, v.fecha_cierre, v.tipo, m.numero, v.metodo_pago, v.propina, v.total, "
+            f"(SELECT string_agg(vi.cantidad::text || 'x ' || vi.nombre, ', ' ORDER BY vi.id) "
+            f"FROM venta_items vi WHERE vi.venta_id = v.id) "
+            f"FROM ventas v LEFT JOIN mesas m ON m.id = v.mesa_id "
+            f"WHERE v.usuario_id = :uid AND v.estado = 'cerrada' "
+            f"AND v.fecha_cierre >= date_trunc('{unidad}', CAST(:ini AS timestamp)) "
+            f"AND v.fecha_cierre < date_trunc('{unidad}', CAST(:ini AS timestamp)) + interval '1 {unidad}' "
+            f"ORDER BY v.fecha_cierre DESC LIMIT 500",
+            uid=current_user.tenant_id, ini=inicio,
+        )
+        return [
+            VentaPeriodoOut(
+                id=r[0], fecha=r[1], tipo=r[2], mesa_numero=r[3], metodo_pago=r[4],
+                propina=float(r[5] or 0), total=float(r[6] or 0), items=r[7] or "",
+            )
+            for r in rows
+        ]
     finally:
         conn.close()
