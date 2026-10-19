@@ -1134,6 +1134,7 @@ class PlanPublicoOut(BaseModel):
     color: str
     caracteristicas: list[str]
     destacado: bool
+    moneda: str = "COP"
     actual: bool = False
 
 

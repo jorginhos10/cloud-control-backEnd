@@ -34,6 +34,16 @@ def _plan_actual_id(current_user: UserOut) -> int | None:
         conn.close()
 
 
+def pais_de_cuenta(tenant_id: int) -> str:
+    """ISO country of the account (detected at sign-up); accounts without one count as Colombia."""
+    conn = get_connection()
+    try:
+        rows = conn.run("SELECT pais FROM usuarios WHERE id = :id", id=tenant_id)
+        return (rows[0][0] or "CO").upper() if rows else "CO"
+    finally:
+        conn.close()
+
+
 def tipo_de_comercio(tenant_id: int) -> str:
     """'store' or 'restobar', from the type the merchant chose on sign-up (accounts with an older type count as restobar)."""
     conn = get_connection()
@@ -44,12 +54,13 @@ def tipo_de_comercio(tenant_id: int) -> str:
         conn.close()
 
 
-# A plan is offered to a merchant when it is active and, either it is of the merchant's type of commerce and public,
-# or the SuperAdmin explicitly assigned it to them (whatever its type).
+# A plan is offered to a merchant when it is active and, either it is public and of the merchant's type of commerce
+# AND country (so a Spanish merchant sees the plans priced in euros, not the Colombian ones), or the SuperAdmin
+# explicitly assigned it to them (whatever its type or country).
 _PLAN_OFRECIDO = """
     p.activo = true
     AND (
-        (p.visibilidad = 'publico' AND p.tipo_comercio = :tipo)
+        (p.visibilidad = 'publico' AND p.tipo_comercio = :tipo AND p.pais = :pais)
         OR EXISTS (SELECT 1 FROM plan_comercios pc WHERE pc.plan_id = p.id AND pc.comercio_id = :tid)
     )
 """
@@ -59,18 +70,18 @@ def _fetch_plan_disponible(sconn, plan_id: int, tenant_id: int):
     """A plan this tenant is actually allowed to pick (see _PLAN_OFRECIDO)."""
     rows = sconn.run(
         f"""
-        SELECT p.id, p.nombre, p.slug, p.descripcion, p.precio, p.periodo, p.color, p.caracteristicas, p.destacado
+        SELECT p.id, p.nombre, p.slug, p.descripcion, p.precio, p.periodo, p.color, p.caracteristicas, p.destacado, p.moneda
         FROM planes p
         WHERE p.id = :id AND {_PLAN_OFRECIDO}
         """,
-        id=plan_id, tid=tenant_id, tipo=tipo_de_comercio(tenant_id),
+        id=plan_id, tid=tenant_id, tipo=tipo_de_comercio(tenant_id), pais=pais_de_cuenta(tenant_id),
     )
     return rows[0] if rows else None
 
 
 def _fetch_plan_by_id(sconn, plan_id: int):
     rows = sconn.run(
-        "SELECT id, nombre, slug, descripcion, precio, periodo, color, caracteristicas, destacado "
+        "SELECT id, nombre, slug, descripcion, precio, periodo, color, caracteristicas, destacado, moneda "
         "FROM planes WHERE id = :id",
         id=plan_id,
     )
@@ -80,7 +91,7 @@ def _fetch_plan_by_id(sconn, plan_id: int):
 def _plan_publico_out(r, actual: bool) -> PlanPublicoOut:
     return PlanPublicoOut(
         id=r[0], nombre=r[1], slug=r[2], descripcion=r[3], precio=float(r[4]),
-        periodo=r[5], color=r[6], caracteristicas=r[7], destacado=r[8], actual=actual,
+        periodo=r[5], color=r[6], caracteristicas=r[7], destacado=r[8], moneda=r[9], actual=actual,
     )
 
 
@@ -122,12 +133,12 @@ def listar_planes_disponibles(tenant_id: int, plan_marcado: int | None) -> list[
     try:
         rows = sconn.run(
             f"""
-            SELECT p.id, p.nombre, p.slug, p.descripcion, p.precio, p.periodo, p.color, p.caracteristicas, p.destacado
+            SELECT p.id, p.nombre, p.slug, p.descripcion, p.precio, p.periodo, p.color, p.caracteristicas, p.destacado, p.moneda
             FROM planes p
             WHERE {_PLAN_OFRECIDO}
             ORDER BY p.orden ASC, p.id ASC
             """,
-            tid=tenant_id, tipo=tipo_de_comercio(tenant_id),
+            tid=tenant_id, tipo=tipo_de_comercio(tenant_id), pais=pais_de_cuenta(tenant_id),
         )
         return [_plan_publico_out(r, actual=(r[0] == plan_marcado)) for r in rows]
     finally:
@@ -160,6 +171,11 @@ def seleccionar_plan(payload: SeleccionarPlanIn, current_user: UserOut = Depends
         if not r:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ese plan no está disponible")
         precio = float(r[4])
+        if precio > 0 and r[9] != "COP":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"El pago de planes en {r[9]} todavía no está disponible. Escríbenos a soporte para activarlo.",
+            )
     finally:
         sconn.close()
 
@@ -261,6 +277,11 @@ def solicitar_pago_nequi(payload: SeleccionarPlanIn, current_user: UserOut = Dep
         if not r:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ese plan no está disponible")
         precio = float(r[4])
+        if precio > 0 and r[9] != "COP":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"El pago de planes en {r[9]} todavía no está disponible. Escríbenos a soporte para activarlo.",
+            )
     finally:
         sconn.close()
 
