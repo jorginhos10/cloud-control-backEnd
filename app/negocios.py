@@ -2,10 +2,21 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from app import sms
 from app.auth import UserOut, get_current_user, require_roles
 from app.database import get_connection, get_superadmin_connection
 from app.moneda import moneda_de_cuenta
-from app.schemas import NegocioAparienciaIn, NegocioAparienciaOut, NegocioIn, NegocioOut
+from app.schemas import (
+    NegocioAparienciaIn,
+    NegocioAparienciaOut,
+    NegocioIn,
+    NegocioOut,
+    TelefonoCodigoIn,
+    TelefonoCodigoOut,
+    TelefonoEstadoOut,
+    TelefonoVerificarIn,
+    TelefonoVerificarOut,
+)
 
 router = APIRouter(prefix="/negocio", dependencies=[Depends(get_current_user)])
 
@@ -75,6 +86,7 @@ def get_negocio(current_user: UserOut = Depends(get_current_user)):
 def guardar_negocio(payload: NegocioIn, current_user: UserOut = Depends(require_roles("admin"))):
     conn = get_connection()
     try:
+        telefono_cambio = _exigir_telefono_verificado(conn, current_user, payload.telefono)
         rows = conn.run(
             f"""
             INSERT INTO negocios (usuario_id, {', '.join(NEGOCIO_EDIT_COLUMNS)})
@@ -112,7 +124,92 @@ def guardar_negocio(payload: NegocioIn, current_user: UserOut = Depends(require_
             sitio_web=payload.sitio_web.strip(),
             logo_url=payload.logo_url,
         )
+        # El teléfono del propietario es al que llega el SMS de recuperación de contraseña: si acaba de
+        # verificar uno nuevo, ese pasa a ser el de su cuenta.
+        if telefono_cambio and current_user.propietario:
+            conn.run("UPDATE usuarios SET telefono = :t WHERE id = :id", t=payload.telefono.strip(), id=current_user.id)
         return NegocioOut(**dict(zip(NEGOCIO_COLUMNS, rows[0])))
+    finally:
+        conn.close()
+
+
+def _pais_del_comercio(conn, tenant_id: int) -> str | None:
+    rows = conn.run("SELECT pais FROM usuarios WHERE id = :id", id=tenant_id)
+    return rows[0][0] if rows else None
+
+
+def _exigir_telefono_verificado(conn, current_user: UserOut, telefono: str) -> bool:
+    """Si la verificación por SMS aplica al país del comercio, un teléfono nuevo debe estar verificado.
+
+    Devuelve True cuando el teléfono cambió (y, de ser necesario, ya estaba verificado). Un teléfono que no se
+    toca no pide verificación: las cuentas anteriores a esta regla siguen guardando sin problema.
+    """
+    nuevo = sms.solo_digitos(telefono)
+    actual = conn.run("SELECT telefono FROM negocios WHERE usuario_id = :id", id=current_user.tenant_id)
+    anterior = sms.solo_digitos(actual[0][0]) if actual else ""
+    if not nuevo or nuevo == anterior:
+        return False
+    if sms.verificacion_requerida(_pais_del_comercio(conn, current_user.tenant_id)):
+        verificado = conn.run("SELECT telefono_verificado FROM usuarios WHERE id = :id", id=current_user.id)[0][0]
+        if verificado != nuevo:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Verifica el nuevo teléfono con el código que te enviamos por SMS",
+            )
+    return True
+
+
+@router.get("/telefono/estado", response_model=TelefonoEstadoOut)
+def estado_telefono(current_user: UserOut = Depends(require_roles("admin"))):
+    conn = get_connection()
+    try:
+        requerida = sms.verificacion_requerida(_pais_del_comercio(conn, current_user.tenant_id))
+        verificado = conn.run("SELECT telefono_verificado FROM usuarios WHERE id = :id", id=current_user.id)[0][0]
+        return TelefonoEstadoOut(
+            requerida=requerida,
+            telefono_verificado=verificado or "",
+            codigo_pendiente_telefono=sms.telefono_con_codigo_pendiente(conn, current_user.id) if requerida else "",
+        )
+    finally:
+        conn.close()
+
+
+@router.post("/telefono/codigo", response_model=TelefonoCodigoOut)
+def enviar_codigo_telefono(payload: TelefonoCodigoIn, current_user: UserOut = Depends(require_roles("admin"))):
+    """Manda por SMS un código de 4 dígitos al teléfono nuevo del comercio."""
+    digitos = sms.solo_digitos(payload.telefono)
+    if len(digitos) < 7:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Escribe un número de teléfono válido")
+    conn = get_connection()
+    try:
+        pais = _pais_del_comercio(conn, current_user.tenant_id)
+        if not sms.verificacion_requerida(pais):
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="La verificación por SMS no está disponible")
+        if conn.run("SELECT 1 FROM usuarios WHERE telefono_verificado = :t AND id <> :id", t=digitos, id=current_user.id):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ese número ya está registrado en otra cuenta")
+        try:
+            resultado = sms.emitir_codigo(conn, current_user.id, payload.telefono, pais)
+        except sms.SmsFallo:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="No pudimos enviar el mensaje. Revisa el número e inténtalo de nuevo.",
+            )
+        if not resultado["ok"] and resultado["motivo"] == "limite":
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Pediste demasiados códigos. Inténtalo en una hora.")
+        return TelefonoCodigoOut(**resultado)
+    finally:
+        conn.close()
+
+
+@router.post("/telefono/verificar", response_model=TelefonoVerificarOut)
+def verificar_codigo_telefono(payload: TelefonoVerificarIn, current_user: UserOut = Depends(require_roles("admin"))):
+    conn = get_connection()
+    try:
+        resultado = sms.comprobar_codigo(conn, current_user.id, payload.codigo)
+        if resultado == "ok":
+            verificado = conn.run("SELECT telefono_verificado FROM usuarios WHERE id = :id", id=current_user.id)[0][0]
+            return TelefonoVerificarOut(verificado=True, resultado="ok", telefono_verificado=verificado)
+        return TelefonoVerificarOut(verificado=False, resultado=resultado)
     finally:
         conn.close()
 

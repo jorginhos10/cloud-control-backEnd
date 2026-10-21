@@ -1517,6 +1517,12 @@ class TelefonoVerificarIn(BaseModel):
     codigo: str = Field(min_length=4, max_length=4, pattern=r"^[0-9]{4}$")
 
 
+class TelefonoEstadoOut(BaseModel):
+    requerida: bool
+    telefono_verificado: str = ""
+    codigo_pendiente_telefono: str = ""
+
+
 class TelefonoVerificarOut(BaseModel):
     verificado: bool
     resultado: str
