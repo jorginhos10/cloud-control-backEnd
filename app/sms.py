@@ -129,6 +129,8 @@ def _enviar_con_proveedor(destino: str, texto: str) -> None:
     auth = None
     tipo = cfg["auth_tipo"]
     secreto = (cfg["auth_secreto"] or "").strip().strip("\"'").strip()
+    if tipo != "ninguna" and not secreto:
+        raise SmsFallo("Falta la clave o el token de la API: pégalo en la tuerca de Mensajería y guarda")
     if tipo == "basic":
         auth = (cfg["auth_usuario"].strip(), secreto)
     elif tipo == "bearer":
