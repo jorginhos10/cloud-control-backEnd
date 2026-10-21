@@ -57,10 +57,9 @@ def _config() -> dict | None:
             if rows:
                 cfg = dict(zip(CONFIG_COLUMNAS, rows[0]))
                 # Países con el interruptor encendido en el mapa de Mensajería: solo ellos piden el código.
-                cfg["paises"] = {
-                    r[0].upper()
-                    for r in sconn.run("SELECT codigo_pais FROM regiones WHERE sms_verificacion AND activo")
-                }
+                regiones = sconn.run("SELECT codigo_pais, sms_verificacion, activo, indicativo FROM regiones")
+                cfg["paises"] = {r[0].upper() for r in regiones if r[1] and r[2]}
+                cfg["indicativos"] = {r[0].upper(): r[3] for r in regiones if r[3]}
         finally:
             sconn.close()
     except Exception:
@@ -90,13 +89,22 @@ def solo_digitos(telefono: str) -> str:
 
 
 def a_internacional(telefono: str, pais: str | None) -> str:
-    """Dígitos con indicativo de país, que es lo que piden los proveedores (57300… para Colombia)."""
+    """Dígitos con indicativo de país, que es lo que piden los proveedores (57300… para Colombia).
+
+    El indicativo sale de la región (Regiones › Indicativo). Si la persona ya lo escribió, se respeta;
+    si escribió solo el número local, se le antepone.
+    """
     d = solo_digitos(telefono)
     if d.startswith("00"):
         d = d[2:]
-    if (pais or "CO").upper() == "CO" and len(d) == 10 and d.startswith("3"):
-        return "57" + d
-    return d
+    codigo = (pais or "CO").upper()
+    cfg = _config() or {}
+    ind = (cfg.get("indicativos") or {}).get(codigo) or ("57" if codigo == "CO" else "")
+    if not ind:
+        return d
+    if d.startswith(ind) and len(d) >= len(ind) + 7:
+        return d
+    return ind + d.lstrip("0")
 
 
 def _hash_codigo(usuario_id: int, codigo: str) -> str:
@@ -113,7 +121,8 @@ def generar_codigo() -> str:
 
 
 _PATRON = re.compile(r"\{(telefono|mensaje|remitente|usuario)\}")
-_TIMEOUT_S = 10.0
+_TIMEOUT_S = 15.0
+SIN_CONFIRMACION = "sin_confirmacion"
 
 
 def _cuerpo_json(plantilla: str, valores: dict) -> str:
@@ -131,8 +140,11 @@ def _campos_form(plantilla: str, valores: dict) -> dict:
     return campos
 
 
-def _enviar_con_proveedor(destino: str, texto: str) -> None:
-    """Llama a la API del proveedor según la configuración guardada. Lanza SmsFallo si no se pudo enviar."""
+def _enviar_con_proveedor(destino: str, texto: str) -> str:
+    """Llama a la API del proveedor según la configuración guardada. Lanza SmsFallo si no se pudo enviar.
+
+    Devuelve SIN_CONFIRMACION si el proveedor no alcanzó a responder a tiempo: el mensaje ya salió de aquí
+    y puede haber llegado, así que no se trata como un fallo."""
     cfg = _config()
     if not cfg or not cfg["url"]:
         raise SmsFallo("La API del proveedor no está configurada")
@@ -162,6 +174,8 @@ def _enviar_con_proveedor(destino: str, texto: str) -> None:
         else:
             kwargs["params" if cfg["metodo"] == "GET" else "data"] = _campos_form(cfg["cuerpo_plantilla"], valores)
         resp = httpx.request(cfg["metodo"], cfg["url"], headers=headers, auth=auth, timeout=_TIMEOUT_S, **kwargs)
+    except httpx.ReadTimeout:
+        return SIN_CONFIRMACION
     except (httpx.HTTPError, ValueError) as exc:
         raise SmsFallo(f"No se pudo conectar con el proveedor: {type(exc).__name__} {str(exc)[:120]}".strip()) from exc
 
@@ -170,6 +184,7 @@ def _enviar_con_proveedor(destino: str, texto: str) -> None:
         raise SmsFallo(f"El proveedor respondió HTTP {resp.status_code}: {detalle}")
     if cfg["exito_contiene"] and cfg["exito_contiene"] not in resp.text:
         raise SmsFallo(f"La respuesta no contiene «{cfg['exito_contiene']}»: {detalle}")
+    return "ok"
 
 
 def enviar_sms(conn, usuario_id: int | None, telefono: str, texto: str, proposito: str, pais: str | None) -> None:
@@ -179,7 +194,8 @@ def enviar_sms(conn, usuario_id: int | None, telefono: str, texto: str, proposit
     destino = a_internacional(telefono, pais)
     estado, error = "enviado", ""
     try:
-        _enviar_con_proveedor(destino, texto)
+        if _enviar_con_proveedor(destino, texto) == SIN_CONFIRMACION:
+            error = "Sin confirmación del proveedor (tiempo agotado): el mensaje pudo haber llegado"
     except SmsFallo as exc:
         estado, error = "fallido", str(exc)[:500]
         logger.warning("SMS fallido a %s: %s", destino[-4:], error)
@@ -213,36 +229,46 @@ def emitir_codigo(conn, usuario_id: int, telefono: str, pais: str | None) -> dic
 
     codigo = generar_codigo()
     texto = f"Violet: tu código de verificación es {codigo}. Vence en {CODIGO_VIGENCIA_MIN} minutos. No lo compartas."
-    enviar_sms(conn, usuario_id, telefono, texto, "verificacion", pais)
-    conn.run(
-        "INSERT INTO verificaciones_telefono (usuario_id, telefono, codigo_hash, expira_en) VALUES (:u, :t, :h, :x)",
+    vid = conn.run(
+        "INSERT INTO verificaciones_telefono (usuario_id, telefono, codigo_hash, expira_en) VALUES (:u, :t, :h, :x) RETURNING id",
         u=usuario_id, t=solo_digitos(telefono), h=_hash_codigo(usuario_id, codigo),
         x=ahora + timedelta(minutes=CODIGO_VIGENCIA_MIN),
-    )
+    )[0][0]
+    try:
+        enviar_sms(conn, usuario_id, telefono, texto, "verificacion", pais)
+    except Exception:
+        # No salió: se descarta el código para no gastar el tiempo de espera de quien lo pidió.
+        conn.run("DELETE FROM verificaciones_telefono WHERE id = :i", i=vid)
+        raise
     return {"ok": True, "esperar_s": REENVIO_ESPERA_S, "motivo": ""}
 
 
 def comprobar_codigo(conn, usuario_id: int, codigo: str) -> str:
-    """'ok', 'incorrecto', 'vencido' o 'bloqueado'. Con 'ok' deja el teléfono marcado como verificado."""
+    """'ok', 'incorrecto', 'vencido' o 'bloqueado'. Con 'ok' deja el teléfono marcado como verificado.
+
+    Se acepta cualquiera de los últimos códigos vigentes: si pidieron otro porque el SMS tardó, el primero
+    que llegue también sirve.
+    """
     ahora = datetime.now(timezone.utc)
-    fila = conn.run(
+    filas = conn.run(
         "SELECT id, telefono, codigo_hash, intentos, expira_en FROM verificaciones_telefono "
-        "WHERE usuario_id = :u AND verificado_en IS NULL ORDER BY created_at DESC LIMIT 1",
+        "WHERE usuario_id = :u AND verificado_en IS NULL ORDER BY created_at DESC LIMIT 3",
         u=usuario_id,
     )
-    if not fila:
+    vigentes = [f for f in filas if f[4] >= ahora]
+    if not vigentes:
         return "vencido"
-    vid, telefono, esperado, intentos, expira = fila[0]
-    if expira < ahora:
-        return "vencido"
-    if intentos >= MAX_INTENTOS:
+    if all(f[3] >= MAX_INTENTOS for f in vigentes):
         return "bloqueado"
-    conn.run("UPDATE verificaciones_telefono SET intentos = intentos + 1 WHERE id = :i", i=vid)
-    if not hmac.compare_digest(esperado, _hash_codigo(usuario_id, solo_digitos(codigo))):
-        return "bloqueado" if intentos + 1 >= MAX_INTENTOS else "incorrecto"
-    conn.run("UPDATE verificaciones_telefono SET verificado_en = now() WHERE id = :i", i=vid)
-    conn.run("UPDATE usuarios SET telefono_verificado = :t WHERE id = :u", t=telefono, u=usuario_id)
-    return "ok"
+    digitos = solo_digitos(codigo)
+    for vid, telefono, esperado, intentos, _ in vigentes:
+        if intentos < MAX_INTENTOS and hmac.compare_digest(esperado, _hash_codigo(usuario_id, digitos)):
+            conn.run("UPDATE verificaciones_telefono SET verificado_en = now() WHERE id = :i", i=vid)
+            conn.run("UPDATE usuarios SET telefono_verificado = :t WHERE id = :u", t=telefono, u=usuario_id)
+            return "ok"
+    for vid, _, _, intentos, _ in vigentes:
+        conn.run("UPDATE verificaciones_telefono SET intentos = intentos + 1 WHERE id = :i", i=vid)
+    return "bloqueado" if all(f[3] + 1 >= MAX_INTENTOS for f in vigentes) else "incorrecto"
 
 
 def telefono_con_codigo_pendiente(conn, usuario_id: int) -> str:
