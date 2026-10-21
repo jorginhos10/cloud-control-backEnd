@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.auth import get_current_user_any_status
 from app.database import get_connection, get_superadmin_connection
+from app import sms
 from app.moneda import moneda_de_cuenta
 from app.schemas import (
     OnboardingDatosIn,
@@ -14,6 +15,10 @@ from app.schemas import (
     OnboardingOut,
     OnboardingPlanIn,
     PlanPublicoOut,
+    TelefonoCodigoIn,
+    TelefonoCodigoOut,
+    TelefonoVerificarIn,
+    TelefonoVerificarOut,
     UserOut,
 )
 from app.suscripcion import _fetch_plan_by_id, _fetch_plan_disponible, listar_planes_disponibles
@@ -94,7 +99,7 @@ def _estado_completo(conn, user_id: int) -> OnboardingOut:
     row = conn.run(
         """
         SELECT u.numero_documento, u.telefono, u.estado_aprobacion, u.motivo_rechazo, u.plan_solicitado_id,
-               n.nombre, n.tipo, n.rut, n.direccion, n.ciudad, n.sitio_web, n.logo_url
+               n.nombre, n.tipo, n.rut, n.direccion, n.ciudad, n.sitio_web, n.logo_url, u.telefono_verificado
         FROM usuarios u LEFT JOIN negocios n ON n.usuario_id = u.id
         WHERE u.id = :id
         """,
@@ -120,6 +125,8 @@ def _estado_completo(conn, user_id: int) -> OnboardingOut:
         logo_url=row[11],
         documentos=[dict(zip(DOC_COLUMNS, d)) for d in documentos],
         tipos_comercio_habilitados=_tipos_comercio_habilitados(),
+        verificacion_sms_requerida=sms.sms_configurado(),
+        telefono_verificado=row[12] or "",
     )
 
 
@@ -166,6 +173,14 @@ def guardar_datos(payload: OnboardingDatosIn, current_user: UserOut = Depends(ge
         ):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya existe una cuenta con ese número de documento")
 
+        if sms.sms_configurado():
+            verificado = conn.run("SELECT telefono_verificado FROM usuarios WHERE id = :id", id=current_user.id)[0][0]
+            if not verificado or verificado != sms.solo_digitos(payload.telefono):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Verifica tu número de teléfono con el código que te enviamos por SMS",
+                )
+
         conn.run("BEGIN")
         try:
             conn.run(
@@ -191,6 +206,54 @@ def guardar_datos(payload: OnboardingDatosIn, current_user: UserOut = Depends(ge
             raise
         _descartar_plan_no_disponible(conn, current_user.id)
         return _estado_completo(conn, current_user.id)
+    finally:
+        conn.close()
+
+
+def _pais_de(conn, usuario_id: int) -> str | None:
+    rows = conn.run("SELECT pais FROM usuarios WHERE id = :id", id=usuario_id)
+    return rows[0][0] if rows else None
+
+
+@router.post("/telefono/codigo", response_model=TelefonoCodigoOut)
+def enviar_codigo_telefono(payload: TelefonoCodigoIn, current_user: UserOut = Depends(get_current_user_any_status)):
+    """Manda por SMS un código de 4 dígitos al teléfono que la persona escribió, para comprobar que es suyo."""
+    _require_editable(current_user)
+    if not sms.sms_configurado():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="La verificación por SMS no está disponible")
+    digitos = sms.solo_digitos(payload.telefono)
+    if len(digitos) < 7:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Escribe un número de teléfono válido")
+    conn = get_connection()
+    try:
+        if conn.run(
+            "SELECT 1 FROM usuarios WHERE telefono_verificado = :t AND id <> :id", t=digitos, id=current_user.id,
+        ):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ese número ya está registrado en otra cuenta")
+        try:
+            resultado = sms.emitir_codigo(conn, current_user.id, payload.telefono, _pais_de(conn, current_user.id))
+        except sms.SmsFallo:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="No pudimos enviar el mensaje. Revisa el número e inténtalo de nuevo.",
+            )
+        if not resultado["ok"] and resultado["motivo"] == "limite":
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Pediste demasiados códigos. Inténtalo en una hora.")
+        return TelefonoCodigoOut(**resultado)
+    finally:
+        conn.close()
+
+
+@router.post("/telefono/verificar", response_model=TelefonoVerificarOut)
+def verificar_codigo_telefono(payload: TelefonoVerificarIn, current_user: UserOut = Depends(get_current_user_any_status)):
+    _require_editable(current_user)
+    conn = get_connection()
+    try:
+        resultado = sms.comprobar_codigo(conn, current_user.id, payload.codigo)
+        if resultado == "ok":
+            verificado = conn.run("SELECT telefono_verificado FROM usuarios WHERE id = :id", id=current_user.id)[0][0]
+            return TelefonoVerificarOut(verificado=True, resultado="ok", telefono_verificado=verificado)
+        return TelefonoVerificarOut(verificado=False, resultado=resultado)
     finally:
         conn.close()
 

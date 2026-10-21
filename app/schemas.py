@@ -1503,6 +1503,26 @@ class OnboardingDatosIn(BaseModel):
     sitio_web: str = Field(default="", max_length=200)
 
 
+class TelefonoCodigoIn(BaseModel):
+    telefono: str = Field(min_length=7, max_length=30)
+
+
+class TelefonoCodigoOut(BaseModel):
+    ok: bool
+    esperar_s: int = 0
+    motivo: str = ""
+
+
+class TelefonoVerificarIn(BaseModel):
+    codigo: str = Field(min_length=4, max_length=4, pattern=r"^[0-9]{4}$")
+
+
+class TelefonoVerificarOut(BaseModel):
+    verificado: bool
+    resultado: str
+    telefono_verificado: str = ""
+
+
 class OnboardingLogoIn(BaseModel):
     logo_url: Optional[str] = Field(default=None, max_length=3_000_000)
 
@@ -1543,6 +1563,9 @@ class OnboardingOut(BaseModel):
     estado_aprobacion: EstadoAprobacion = "pendiente_datos"
     motivo_rechazo: str = ""
     tipos_comercio_habilitados: list[str] = ["Store", "Restobar"]
+    # Si hay proveedor de SMS, el teléfono se confirma con un código antes de guardar los datos.
+    verificacion_sms_requerida: bool = False
+    telefono_verificado: str = ""
 
 
 TipoContrato = Literal["indefinido", "fijo", "obra_labor", "prestacion_servicios"]
