@@ -99,7 +99,7 @@ def _estado_completo(conn, user_id: int) -> OnboardingOut:
     row = conn.run(
         """
         SELECT u.numero_documento, u.telefono, u.estado_aprobacion, u.motivo_rechazo, u.plan_solicitado_id,
-               n.nombre, n.tipo, n.rut, n.direccion, n.ciudad, n.sitio_web, n.logo_url, u.telefono_verificado
+               n.nombre, n.tipo, n.rut, n.direccion, n.ciudad, n.sitio_web, n.logo_url, u.telefono_verificado, u.pais
         FROM usuarios u LEFT JOIN negocios n ON n.usuario_id = u.id
         WHERE u.id = :id
         """,
@@ -125,8 +125,9 @@ def _estado_completo(conn, user_id: int) -> OnboardingOut:
         logo_url=row[11],
         documentos=[dict(zip(DOC_COLUMNS, d)) for d in documentos],
         tipos_comercio_habilitados=_tipos_comercio_habilitados(),
-        verificacion_sms_requerida=sms.sms_configurado(),
+        verificacion_sms_requerida=sms.verificacion_requerida(row[13]),
         telefono_verificado=row[12] or "",
+        telefono_codigo_pendiente=sms.telefono_con_codigo_pendiente(conn, user_id),
     )
 
 
@@ -162,6 +163,11 @@ def _descartar_plan_no_disponible(conn, usuario_id: int) -> None:
         sconn.close()
 
 
+def _pais_de(conn, usuario_id: int) -> str | None:
+    rows = conn.run("SELECT pais FROM usuarios WHERE id = :id", id=usuario_id)
+    return rows[0][0] if rows else None
+
+
 @router.put("/datos", response_model=OnboardingOut)
 def guardar_datos(payload: OnboardingDatosIn, current_user: UserOut = Depends(get_current_user_any_status)):
     _require_editable(current_user)
@@ -173,7 +179,7 @@ def guardar_datos(payload: OnboardingDatosIn, current_user: UserOut = Depends(ge
         ):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ya existe una cuenta con ese número de documento")
 
-        if sms.sms_configurado():
+        if sms.verificacion_requerida(_pais_de(conn, current_user.id)):
             verificado = conn.run("SELECT telefono_verificado FROM usuarios WHERE id = :id", id=current_user.id)[0][0]
             if not verificado or verificado != sms.solo_digitos(payload.telefono):
                 raise HTTPException(
@@ -210,22 +216,17 @@ def guardar_datos(payload: OnboardingDatosIn, current_user: UserOut = Depends(ge
         conn.close()
 
 
-def _pais_de(conn, usuario_id: int) -> str | None:
-    rows = conn.run("SELECT pais FROM usuarios WHERE id = :id", id=usuario_id)
-    return rows[0][0] if rows else None
-
-
 @router.post("/telefono/codigo", response_model=TelefonoCodigoOut)
 def enviar_codigo_telefono(payload: TelefonoCodigoIn, current_user: UserOut = Depends(get_current_user_any_status)):
     """Manda por SMS un código de 4 dígitos al teléfono que la persona escribió, para comprobar que es suyo."""
     _require_editable(current_user)
-    if not sms.sms_configurado():
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="La verificación por SMS no está disponible")
     digitos = sms.solo_digitos(payload.telefono)
     if len(digitos) < 7:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Escribe un número de teléfono válido")
     conn = get_connection()
     try:
+        if not sms.verificacion_requerida(_pais_de(conn, current_user.id)):
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="La verificación por SMS no está disponible")
         if conn.run(
             "SELECT 1 FROM usuarios WHERE telefono_verificado = :t AND id <> :id", t=digitos, id=current_user.id,
         ):

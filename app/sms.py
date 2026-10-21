@@ -24,7 +24,7 @@ logger = logging.getLogger("sms")
 
 CODIGO_VIGENCIA_MIN = 10
 MAX_INTENTOS = 5
-REENVIO_ESPERA_S = 60
+REENVIO_ESPERA_S = 180
 MAX_ENVIOS_POR_HORA = 5
 
 
@@ -56,6 +56,11 @@ def _config() -> dict | None:
             rows = sconn.run(f"SELECT {', '.join(CONFIG_COLUMNAS)} FROM sms_config WHERE id = 1")
             if rows:
                 cfg = dict(zip(CONFIG_COLUMNAS, rows[0]))
+                # Países con el interruptor encendido en el mapa de Mensajería: solo ellos piden el código.
+                cfg["paises"] = {
+                    r[0].upper()
+                    for r in sconn.run("SELECT codigo_pais FROM regiones WHERE sms_verificacion AND activo")
+                }
         finally:
             sconn.close()
     except Exception:
@@ -72,6 +77,12 @@ def proveedor() -> str:
 def sms_configurado() -> bool:
     cfg = _config()
     return bool(cfg and cfg["activo"] and cfg["url"])
+
+
+def verificacion_requerida(pais: str | None) -> bool:
+    """Hay proveedor conectado Y el país de la cuenta está encendido en el mapa de países."""
+    cfg = _config()
+    return bool(sms_configurado() and cfg and (pais or "CO").upper() in cfg.get("paises", set()))
 
 
 def solo_digitos(telefono: str) -> str:
@@ -232,3 +243,15 @@ def comprobar_codigo(conn, usuario_id: int, codigo: str) -> str:
     conn.run("UPDATE verificaciones_telefono SET verificado_en = now() WHERE id = :i", i=vid)
     conn.run("UPDATE usuarios SET telefono_verificado = :t WHERE id = :u", t=telefono, u=usuario_id)
     return "ok"
+
+
+def telefono_con_codigo_pendiente(conn, usuario_id: int) -> str:
+    """Teléfono al que se mandó un código que aún no vence ni se ha usado ('' si no hay)."""
+    if not sms_configurado():
+        return ""
+    fila = conn.run(
+        "SELECT telefono FROM verificaciones_telefono WHERE usuario_id = :u AND verificado_en IS NULL "
+        "AND expira_en > now() AND intentos < :m ORDER BY created_at DESC LIMIT 1",
+        u=usuario_id, m=MAX_INTENTOS,
+    )
+    return fila[0][0] if fila else ""

@@ -1566,6 +1566,8 @@ class OnboardingOut(BaseModel):
     # Si hay proveedor de SMS, el teléfono se confirma con un código antes de guardar los datos.
     verificacion_sms_requerida: bool = False
     telefono_verificado: str = ""
+    # Teléfono (solo dígitos) al que ya se mandó un código que todavía sirve, para seguir mostrando el campo.
+    telefono_codigo_pendiente: str = ""
 
 
 TipoContrato = Literal["indefinido", "fijo", "obra_labor", "prestacion_servicios"]
