@@ -107,15 +107,18 @@ def a_internacional(telefono: str, pais: str | None) -> str:
     return ind + d.lstrip("0")
 
 
+def _secreto() -> bytes:
+    return os.environ.get("JWT_SECRET", "violet").encode()
+
+
 def _hash_codigo(usuario_id: int, codigo: str) -> str:
-    secreto = os.environ.get("JWT_SECRET", "violet").encode()
-    return hmac.new(secreto, f"{usuario_id}:{codigo}".encode(), hashlib.sha256).hexdigest()
+    return hmac.new(_secreto(), f"{usuario_id}:{codigo}".encode(), hashlib.sha256).hexdigest()
 
 
-def generar_codigo() -> str:
-    """4 dígitos, fáciles de teclear; se descartan los que son todos iguales (0000, 7777…)."""
+def generar_codigo(digitos: int = 4) -> str:
+    """Código numérico fácil de teclear; se descartan los que son todos iguales (0000, 777777…)."""
     while True:
-        codigo = f"{secrets.randbelow(10000):04d}"
+        codigo = f"{secrets.randbelow(10**digitos):0{digitos}d}"
         if len(set(codigo)) > 1:
             return codigo
 

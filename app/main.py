@@ -36,6 +36,7 @@ from app.pqrs import router as pqrs_router
 from app.pqrs_publico import router as pqrs_publico_router
 from app.perdidas import router as perdidas_router
 from app.proveedores import router as proveedores_router
+from app.recuperar import router as recuperar_router
 from app.recetas import router as recetas_router
 from app.reportes import router as reportes_router
 from app.sabores import router as sabores_router
@@ -60,6 +61,7 @@ app.add_middleware(
 
 
 app.include_router(auth_router)
+app.include_router(recuperar_router)
 app.include_router(analytics_router)
 app.include_router(apariencia_login_router)
 app.include_router(aplicativos_publico_router)
