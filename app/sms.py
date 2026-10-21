@@ -1,17 +1,24 @@
 """Envío de SMS y verificación del teléfono con un código de 4 dígitos.
 
-El envío real depende del proveedor de SMS (variable de entorno SMS_PROVIDER). Mientras no haya uno
-configurado, la verificación queda apagada y el registro funciona como siempre: así nadie se queda sin
-poder registrarse por un servicio que todavía no está conectado.
+La conexión con el proveedor de SMS (dirección de la API, credenciales, formato del cuerpo) se administra
+desde el panel SuperAdmin (Mensajería › tuerca) y se guarda en la tabla sms_config de su base de datos.
+Mientras no esté activada, la verificación queda apagada y el registro funciona como siempre: así nadie
+se queda sin poder registrarse por un servicio que todavía no está conectado.
 """
 
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
+
+import httpx
+
+from app.database import get_superadmin_connection
 
 logger = logging.getLogger("sms")
 
@@ -29,12 +36,42 @@ class SmsFallo(Exception):
     """El proveedor rechazó o no pudo entregar el mensaje."""
 
 
+CONFIG_COLUMNAS = [
+    "proveedor", "activo", "url", "metodo", "auth_tipo", "auth_usuario", "auth_secreto", "auth_header_nombre",
+    "remitente", "content_type", "cuerpo_plantilla", "exito_contiene",
+]
+_CACHE_S = 15
+_cache: dict = {"t": 0.0, "cfg": None}
+
+
+def _config() -> dict | None:
+    """Configuración del proveedor (se relee cada 15 s para que un cambio del SuperAdmin se aplique pronto)."""
+    ahora = time.time()
+    if ahora - _cache["t"] < _CACHE_S:
+        return _cache["cfg"]
+    cfg = None
+    try:
+        sconn = get_superadmin_connection()
+        try:
+            rows = sconn.run(f"SELECT {', '.join(CONFIG_COLUMNAS)} FROM sms_config WHERE id = 1")
+            if rows:
+                cfg = dict(zip(CONFIG_COLUMNAS, rows[0]))
+        finally:
+            sconn.close()
+    except Exception:
+        logger.warning("No se pudo leer la configuración de SMS", exc_info=True)
+    _cache.update(t=ahora, cfg=cfg)
+    return cfg
+
+
 def proveedor() -> str:
-    return os.environ.get("SMS_PROVIDER", "").strip().lower()
+    cfg = _config()
+    return (cfg["proveedor"] if cfg else "") or ""
 
 
 def sms_configurado() -> bool:
-    return bool(proveedor())
+    cfg = _config()
+    return bool(cfg and cfg["activo"] and cfg["url"])
 
 
 def solo_digitos(telefono: str) -> str:
@@ -64,14 +101,61 @@ def generar_codigo() -> str:
             return codigo
 
 
+_PATRON = re.compile(r"\{(telefono|mensaje|remitente|usuario)\}")
+_TIMEOUT_S = 10.0
+
+
+def _cuerpo_json(plantilla: str, valores: dict) -> str:
+    # Cada valor se escapa como texto JSON, así un mensaje con comillas o saltos de línea no rompe el cuerpo.
+    return _PATRON.sub(lambda m: json.dumps(valores[m.group(1)], ensure_ascii=False)[1:-1], plantilla)
+
+
+def _campos_form(plantilla: str, valores: dict) -> dict:
+    campos = {}
+    for linea in plantilla.splitlines():
+        if "=" not in linea:
+            continue
+        clave, _, valor = linea.partition("=")
+        campos[clave.strip()] = _PATRON.sub(lambda m: valores[m.group(1)], valor.strip())
+    return campos
+
+
 def _enviar_con_proveedor(destino: str, texto: str) -> None:
-    """Entrega el SMS por el proveedor configurado. Debe lanzar SmsFallo si no se pudo enviar."""
-    prov = proveedor()
-    if prov == "inalambria":
-        # Pendiente de conectar: necesito la documentación de la API de Inalámbria (URL, formato de
-        # autenticación y cuerpo del envío) y las credenciales de la cuenta para escribir esta llamada.
-        raise SmsFallo("El proveedor 'inalambria' todavía no está implementado")
-    raise SmsFallo(f"Proveedor de SMS desconocido: {prov}")
+    """Llama a la API del proveedor según la configuración guardada. Lanza SmsFallo si no se pudo enviar."""
+    cfg = _config()
+    if not cfg or not cfg["url"]:
+        raise SmsFallo("La API del proveedor no está configurada")
+    headers: dict[str, str] = {}
+    auth = None
+    tipo = cfg["auth_tipo"]
+    if tipo == "basic":
+        auth = (cfg["auth_usuario"], cfg["auth_secreto"])
+    elif tipo == "bearer":
+        headers["Authorization"] = f"Bearer {cfg['auth_secreto']}"
+    elif tipo == "header":
+        headers[cfg["auth_header_nombre"] or "X-API-Key"] = cfg["auth_secreto"]
+
+    valores = {"telefono": destino, "mensaje": texto, "remitente": cfg["remitente"], "usuario": cfg["auth_usuario"]}
+    kwargs: dict = {}
+    try:
+        if cfg["content_type"] == "json":
+            headers["Content-Type"] = "application/json"
+            cuerpo = _cuerpo_json(cfg["cuerpo_plantilla"], valores)
+            if cfg["metodo"] == "GET":
+                kwargs["params"] = json.loads(cuerpo)
+            else:
+                kwargs["content"] = cuerpo.encode("utf-8")
+        else:
+            kwargs["params" if cfg["metodo"] == "GET" else "data"] = _campos_form(cfg["cuerpo_plantilla"], valores)
+        resp = httpx.request(cfg["metodo"], cfg["url"], headers=headers, auth=auth, timeout=_TIMEOUT_S, **kwargs)
+    except (httpx.HTTPError, ValueError) as exc:
+        raise SmsFallo(f"No se pudo conectar con el proveedor: {type(exc).__name__}") from exc
+
+    detalle = resp.text[:300].replace("\n", " ")
+    if not 200 <= resp.status_code < 300:
+        raise SmsFallo(f"El proveedor respondió HTTP {resp.status_code}: {detalle}")
+    if cfg["exito_contiene"] and cfg["exito_contiene"] not in resp.text:
+        raise SmsFallo(f"La respuesta no contiene «{cfg['exito_contiene']}»: {detalle}")
 
 
 def enviar_sms(conn, usuario_id: int | None, telefono: str, texto: str, proposito: str, pais: str | None) -> None:
